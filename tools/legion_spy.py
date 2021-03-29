@@ -2235,11 +2235,19 @@ class PointSet(object):
                         same_spaces = list()
                     same_spaces.append(space)
             if same_spaces:
+                #print(same_spaces)
+                temp_shape = Shape();
                 for space in same_spaces:
+                    lo,hi = space.shape.bounds
+                    #print(lo.to_string()+' - '+hi.to_string())
                     if self.space_string is None:
-                        self.space_string = str(space)
+                        self.space_string = ""
+                        temp_shape = space.shape.copy()
                     else:
-                        self.space_string += ' u ' + str(space)
+                        #self.space_string += ' u ' + str(space)
+                        temp_shape.__ior__(space.shape)
+                #print(temp_shape.volume())
+                self.space_string += ' Index_Space_Size: ' + str(temp_shape.volume())
         # If we didn't find an index space to represent this
         # set of points then we express this as a union of intersections
         if self.space_string is None:
@@ -2266,13 +2274,19 @@ class PointSet(object):
                             else:
                                 break
                 # Should have at least one bottom space
+                #print(bottom_spaces)
                 assert bottom_spaces
+                temp_shape = Shape();
                 for space in bottom_spaces:
+                    #print(space.shape)
                     if point_str is None:
-                        point_str = '(' + str(space)
+                        point_str = ""
+                        temp_shape = space.shape.copy()
                     else:
-                        point_str += ' ^ ' + str(space)
-                point_str += ')'
+                        #point_str += ' ^ ' + str(space)
+                        temp_shape.__iand__(space.shape)
+                point_str += ' Index_Space_Size: ' + str(temp_shape.volume())
+                #print(temp_shape.volume())
                 if self.space_string is None:
                     self.space_string = point_str
                 else:
@@ -2812,6 +2826,7 @@ class IndexSpace(object):
                 label += '\nSparse Bounds: '
             lo,hi = self.shape.bounds
             label += lo.to_string()+' - '+hi.to_string()
+            label += " volume: " + str(self.shape.volume())
         printer.println('%s [label="%s",shape=plaintext,fontsize=14,fontcolor=black,fontname="Helvetica"];' %
                         (self.node_name, label))
         # print links to children
@@ -3060,9 +3075,9 @@ class Field(object):
 
     def __str__(self):
         if self.name is None:
-            return "Field "+str(self.fid)
+            return "Field "+str(self.fid)+ ", Field_Size: "+str(self.size)+" "
         else:
-            return self.name + ' (' + str(self.fid) + ')'
+            return self.name + ' (' + str(self.fid) + ", Field_Size: "+str(self.size) + ' )'
 
     @property
     def html_safe_name(self):
@@ -5567,7 +5582,7 @@ class Operation(object):
         if self.name is None:
             return OpNames[self.kind] + " " + str(self.uid)
         else:
-            return self.name
+            return self.name + '(' + str(self.uid) + ')'
 
     __repr__ = __str__
 
@@ -7374,8 +7389,12 @@ class Operation(object):
         title = self.html_safe_name+' (UID: '+str(self.uid)+')'
         if self.task is not None and self.task.point.dim > 0:
             title += ' Point: ' + self.task.point.to_string()
+        if self.task is not None:
+            title += ' Processor: ' + str(self.task.processor)
         if self.replayed:
             title += '  (replayed)'
+        if self.task is not None:        
+            output_comp.write("comp: " + title + "\n")
         label = printer.generate_html_op_label(title, self.reqs, self.mappings,
                                        self.get_color(), self.state.detailed_graphs)
         if dataflow or self.task is None or len(self.task.operations) == 0:
@@ -7385,7 +7404,7 @@ class Operation(object):
         else:
             # For non-leaf tasks we need record shape to handle subgraphs
             printer.println(self.node_name+' [label=<'+label+'>,fontsize=14,'+\
-                    'fontcolor=black,shape=record,penwidth=0];')
+                'fontcolor=black,shape=record,penwidth=0];')
 
     def print_dataflow_node(self, printer):
         # Print any close operations that we have, then print ourself 
@@ -7512,24 +7531,26 @@ class Operation(object):
     def print_incoming_event_edges(self, printer):
         if self.cluster_name is not None:
             for src in self.physical_incoming:
-                if src.cluster_name is not None:
-                    printer.println(src.node_name+' -> '+self.node_name+
-                            ' [ltail='+src.cluster_name+',lhead='+
-                            self.cluster_name+',style=solid,color=black,'+
-                            'penwidth=2];')
-                else:
-                    printer.println(src.node_name+' -> '+self.node_name+
-                            ' [lhead='+self.cluster_name+',style=solid,'+
-                            'color=black,penwidth=2];')
+                # if src.cluster_name is not None:
+                #     printer.println(src.node_name+' -> '+self.node_name+
+                #             ' [ltail='+src.cluster_name+',lhead='+
+                #             self.cluster_name+',style=solid,color=black,'+
+                #             'penwidth=2];')
+                # else:
+                #     printer.println(src.node_name+' -> '+self.node_name+
+                #             ' [lhead='+self.cluster_name+',style=solid,'+
+                #             'color=black,penwidth=2];')
+                output_deps.write('deps: ' + src.node_name+' -> '+self.node_name + "\n")
         else:
             for src in self.physical_incoming:
-                if src.cluster_name is not None:
-                    printer.println(src.node_name+' -> '+self.node_name+
-                            ' [ltail='+src.cluster_name+',style=solid,'+
-                            'color=black,penwidth=2];')
-                else:
-                    printer.println(src.node_name+' -> '+self.node_name+
-                            ' [style=solid,color=black,penwidth=2];')
+                # if src.cluster_name is not None:
+                #     printer.println(src.node_name+' -> '+self.node_name+
+                #             ' [ltail='+src.cluster_name+',style=solid,'+
+                #             'color=black,penwidth=2];')
+                # else:
+                #     printer.println(src.node_name+' -> '+self.node_name+
+                #             ' [style=solid,color=black,penwidth=2];')
+                output_deps.write('deps: ' + src.node_name+' -> '+self.node_name + "\n")
 
     def print_eq_node(self, printer, eq_key):
         pass
@@ -8546,7 +8567,7 @@ class Instance(object):
         if self.is_virtual():
             return "Virtual Instance"
         else:
-            return "Instance "+hex(self.handle)
+            return "Instance "+hex(self.handle)+', '+str(self.memory)+', '+str(self.processor)
 
     __repr__ = __str__
 
@@ -9129,13 +9150,14 @@ class RealmBase(object):
 
     def print_incoming_event_edges(self, printer):
         for src in self.physical_incoming:
-            if src.cluster_name is not None:
-                printer.println(src.node_name+' -> '+self.node_name+
-                            ' [ltail='+src.cluster_name+',style=solid,'+
-                            'color=black,penwidth=2];')
-            else:
-                printer.println(src.node_name+' -> '+self.node_name+
-                        ' [style=solid,color=black,penwidth=2];')
+            # if src.cluster_name is not None:
+            #     printer.println(src.node_name+' -> '+self.node_name+
+            #                 ' [ltail='+src.cluster_name+',style=solid,'+
+            #                 'color=black,penwidth=2];')
+            # else:
+            #     printer.println(src.node_name+' -> '+self.node_name+
+            #             ' [style=solid,color=black,penwidth=2];')
+            output_deps.write('deps: ' + src.node_name+' -> ' + self.node_name + "\n")
 
     def print_eq_node(self, printer, eq_key):
         pass
@@ -9494,6 +9516,7 @@ class RealmCopy(RealmBase):
                                         "rowspan" : num_fields})
                         first_field = False
                     lines.append(line)
+        output_comm.write("comm: " + str(lines) + "\n")
         if self.indirections is not None:
             color = 'darkorange'
         else:
@@ -9637,6 +9660,7 @@ class RealmFill(RealmBase):
                                     "rowspan" : num_fields})
                     first_field = False
                 lines.append(line)
+        output_comm.write("comm: " + str(lines) + "\n")
         color = 'chartreuse'
         size = 14
         label = '<table border="0" cellborder="1" cellspacing="0" cellpadding="3" bgcolor="%s">' % color + \
@@ -11816,6 +11840,7 @@ class State(object):
         # task from different nodes, merge them into
         # the one from the original node (e.g. the
         # one with the context)
+        output_alias.write('alias: ' + str(p1.op.uid) + ' ' + str(p2.op.uid) + '\n')
         if p1.op.context:
             assert not p2.op.context
             p1.op.merge(p2.op)
@@ -11838,6 +11863,7 @@ class State(object):
         # is the one that appears in the Realm event graph
         # We know it is the one that ran because it will 
         # have a processor
+        output_alias.write('alias: ' + str(p1.op.uid) + ' ' + str(p2.op.uid) + '\n')
         if p1.processor:
             assert not p2.processor
             # Merge the operations first 
@@ -12026,6 +12052,9 @@ class State(object):
         all_nodes = set()
         op.print_event_graph(printer, elevate, all_nodes, True) 
         # Now print the edges at the very end
+        print("!!!!!!!!!!!!!!")
+        print(all_nodes)
+        print("!!!!!!!!!!!!!!")
         for node in all_nodes:
             node.print_incoming_event_edges(printer) 
         printer.print_pdf_after_close(False, zoom_graphs)
@@ -12581,6 +12610,15 @@ def run_geometry_tests(num_tests=10000):
     return success
 
 def main(temp_dir):
+    global output_comp
+    output_comp = open("comp","w+")
+    global output_comm
+    output_comm = open("comm","w+")
+    global output_deps
+    output_deps = open("deps","w+")
+    global output_alias
+    output_alias = open("alias","w+")
+
     class MyParser(argparse.ArgumentParser):
         def error(self, message):
             self.print_usage(sys.stderr)
@@ -12826,6 +12864,11 @@ def main(temp_dir):
             subprocess.check_call('cp '+temp_dir+'* .',shell=True)
         except:
             print('WARNING: Unable to copy temporary files into current directory')
+
+    output_comp.close()
+    output_comm.close()
+    output_deps.close()
+    output_alias.close()
 
 if __name__ == "__main__":
     temp_dir = tempfile.mkdtemp()+'/'

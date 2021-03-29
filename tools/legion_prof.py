@@ -1491,6 +1491,7 @@ class Task(Operation, TimeRange, HasDependencies, HasWaiters):
         self.variant = variant
         self.initiation = ''
         self.is_task = True
+        output_comp.write(self.get_info()[1:-1] + ' ' + str(self.total_time()) + '\n')
 
     def assign_color(self, color):
         assert self.color is None
@@ -1705,6 +1706,7 @@ class Copy(Base, TimeRange, HasInitiationDependencies):
         self.fevent = fevent
         self.num_requests = num_requests
         self.copy_info = list()
+        output_copy.write(str(self.size) + " " + hex(self.src.mem_id) + " " + hex(self.dst.mem_id) + "\n")
 
     def add_copy_info(self, entry):
         self.copy_info.append(entry)
@@ -2540,7 +2542,7 @@ class State(object):
             "CopyInstInfo": self.log_copy_inst_info
             #"UserInfo": self.log_user_info
         }
-
+        
     def log_max_dim(self, max_dim):
         self.max_dim = max_dim
 
@@ -2665,7 +2667,7 @@ class State(object):
         cpy = self.find_copy(fevent)
         entry = self.create_copy_inst_info(src_inst, dst_inst, fevent, num_fields, request_type, num_hops)
         cpy.add_copy_info(entry)
-
+ 
     def log_fill_info(self, op_id, dst, create, ready, start, stop):
         op = self.find_op(op_id)
         dst = self.find_memory(dst)
@@ -3931,6 +3933,11 @@ class State(object):
             json.dump(scale_data, scale_json_file)
 
 def main():
+    global output_comp
+    output_comp = open("cost","w+")
+    global output_copy
+    output_copy = open("copy","w+")
+
     class MyParser(argparse.ArgumentParser):
         def error(self, message):
             self.print_usage(sys.stderr)
@@ -4045,6 +4052,9 @@ def main():
                              file_names, show_channels, show_instances, force)
         if show_copy_matrix:
             state.show_copy_matrix(copy_output_prefix)
+
+    output_comp.close()
+    output_copy.close()
 
 if __name__ == '__main__':
     start = time.time()
