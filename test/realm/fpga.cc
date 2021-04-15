@@ -4,7 +4,7 @@ using namespace Realm;
 
 // execute a task on FPGA Processor
 
-Logger log_app("fpga");
+Logger log_app("app");
 
 enum {
   TOP_LEVEL_TASK = Processor::TASK_ID_FIRST_AVAILABLE+0,
@@ -21,21 +21,21 @@ void top_level_task(const void *args, size_t arglen,
 		            const void *userdata, size_t userlen, Processor p)
 {
   log_app.print() << "top task running on " << p;
-
+  std::set<Event> finish_events;
   Machine machine = Machine::get_machine();
   std::set<Processor> all_processors;
   machine.get_all_processors(all_processors);
+  int argu = 0;
   for(std::set<Processor>::const_iterator it = all_processors.begin();
       it != all_processors.end();
-	  it++) {
+	    it++) {
     Processor pp = (*it);
-
-    // only ACCEL_PROCs
-    if(pp.kind() != Processor::ACCEL_PROC)
+    if(pp.kind() != Processor::FPGA_PROC)
       continue;
 
-    int argu = 1;
     Event e = pp.spawn(FPGA_TASK, &argu, sizeof(argu));
+    log_app.print() << "spawn fpga task " << argu;
+    argu++;
 
     finish_events.insert(e);
   }

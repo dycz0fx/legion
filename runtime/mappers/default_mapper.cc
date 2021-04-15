@@ -1004,7 +1004,7 @@ namespace Legion {
       if (local_pys.size() > 0) ranking.push_back(Processor::PY_PROC);
       if ((local_gpus.size() > 0) && prefer_cpu)
        ranking.push_back(Processor::TOC_PROC);
-      if (local_accels.size() > 0) ranking.push_back(Processor::FPGA_PROC);
+      if (local_fpgas.size() > 0) ranking.push_back(Processor::FPGA_PROC);
     }
 
     //--------------------------------------------------------------------------
@@ -1164,9 +1164,6 @@ namespace Legion {
                 }
                 break;
               }
-            default:
-              assert(false); // unrecognized processor kind
-          }
             case Processor::FPGA_PROC:
               {
                 if (task.index_domain.get_volume() > local_fpgas.size())

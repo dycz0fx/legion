@@ -62,6 +62,9 @@
 #if defined REALM_USE_MPI
 #include "realm/mpi/mpi_module.h"
 #endif
+#if defined REALM_USE_FPGA
+#include "realm/fpga/fpga_module.h"
+#endif
 
 namespace Realm {
 
