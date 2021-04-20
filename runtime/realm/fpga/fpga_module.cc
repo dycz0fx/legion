@@ -42,7 +42,7 @@ namespace Realm {
         exit(1);
       }}
 
-      for (int i = 0; i < m->cfg_num_fpgas; i++) {
+      for (size_t i = 0; i < m->cfg_num_fpgas; i++) {
         // template arguments must be known at compile time and const
         FPGADevice *fpga_device = new FPGADevice("fpga" + std::to_string(i));
         m->fpga_devices.push_back(fpga_device);
@@ -70,7 +70,7 @@ namespace Realm {
     //   RuntimeImpl::next_local_processor_id)
     void FPGAModule::create_processors(RuntimeImpl *runtime) {
       Module::create_processors(runtime); 
-      for (int i = 0; i < cfg_num_fpgas; i++) {
+      for (size_t i = 0; i < cfg_num_fpgas; i++) {
         Processor p = runtime->next_local_processor_id();
         FPGAProcessor *proc = new FPGAProcessor(fpga_devices[i], p, runtime->core_reservation_set());
         fpga_procs_.push_back(proc);
@@ -183,7 +183,7 @@ namespace Realm {
       core_rsrv_ = new Realm::CoreReservation(name, crs, params);
 
       #ifdef REALM_USE_USER_THREADS
-      UserThreadTaskScheduler *sched = new FPFATaskScheduler<UserThreadTaskScheduler>(me, *core_rsrv_, this);
+      UserThreadTaskScheduler *sched = new FPGATaskScheduler<UserThreadTaskScheduler>(me, *core_rsrv_, this);
       #else
       KernelThreadTaskScheduler *sched = new FPGATaskScheduler<KernelThreadTaskScheduler>(me, *core_rsrv_, this);
       #endif

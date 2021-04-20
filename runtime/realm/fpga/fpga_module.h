@@ -58,7 +58,7 @@ namespace Realm {
         virtual void cleanup(void);
 
       public:
-        unsigned cfg_num_fpgas;
+        size_t cfg_num_fpgas;
         std::string cfg_xclbin_path;
         std::vector<FPGADevice *> fpga_devices;
 
