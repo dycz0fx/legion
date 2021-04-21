@@ -675,14 +675,13 @@ endif
 
 # Realm doesn't use FPGA by default
 USE_FPGA ?= 0
-FPGA_LIBNAME ?= fpga
 ifeq ($(strip $(USE_FPGA)), 1)
   REALM_CC_FLAGS      += -DREALM_USE_FPGA
   LEGION_CC_FLAGS     += -DLEGION_USE_FPGA
   # provide this for backward-compatibility in applications
   CC_FLAGS            += -DUSE_FPGA
   FC_FLAGS	      += -DUSE_FPGA
-  # LEGION_LD_FLAGS      += -l$(FPGA_LIBNAME)
+  LEGION_LD_FLAGS      += -lxrt_coreutil -luuid
   ifdef FPGA_ROOT
        CC_FLAGS    += -I$(FPGA_ROOT)/include
        FC_FLAGS    += -I$(FPGA_ROOT)/include
@@ -912,7 +911,8 @@ REALM_SRC 	+= $(LG_RT_DIR)/realm/hdf5/hdf5_module.cc \
 		   $(LG_RT_DIR)/realm/hdf5/hdf5_access.cc
 endif
 ifeq ($(strip $(USE_FPGA)),1)
-REALM_SRC 	+= $(LG_RT_DIR)/realm/fpga/fpga_module.cc
+REALM_SRC 	+= $(LG_RT_DIR)/realm/fpga/fpga_module.cc \
+               $(LG_RT_DIR)/realm/fpga/fpga_utils.cc
 endif
 
 REALM_SRC 	+= $(LG_RT_DIR)/realm/activemsg.cc \

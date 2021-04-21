@@ -6,22 +6,27 @@
 #include "realm/mem_impl.h"
 #include "realm/runtime_impl.h"
 
+// XRT includes
+#include "experimental/xrt_device.h"
+#include "experimental/xrt_kernel.h"
+#include "experimental/xrt_bo.h"
+
 namespace Realm {
   namespace FPGA {
     class FPGADevice {
       public:
         std::string name;
-        FPGADevice();
-        FPGADevice(std::string name);
+        xrt::device *device;
+        FPGADevice(xrt::device *device, std::string name);
     };
 
     class FPGAProcessor : public LocalTaskProcessor {
       public:
         FPGAProcessor(FPGADevice *fpga_device, Processor me, Realm::CoreReservationSet &crs);
         virtual ~FPGAProcessor(void);
-              
-      protected:
+        static FPGAProcessor *get_current_fpga_proc(void);
         FPGADevice *fpga_device;
+      protected:
         Realm::CoreReservation *core_rsrv_;
     };
 
@@ -59,7 +64,6 @@ namespace Realm {
 
       public:
         size_t cfg_num_fpgas;
-        std::string cfg_xclbin_path;
         std::vector<FPGADevice *> fpga_devices;
 
       protected:

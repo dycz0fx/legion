@@ -4,22 +4,17 @@
 #include "realm/cmdline.h"
 #include "realm/utils.h"
 
-// // each task access by include header file where the namespace is declared
-// namespace XRTContext {
-//   // define extern xrt_device
-//   thread_local XRTDevice<HW_EXP_SIZE, HW_MANT_SIZE> *xrt_device = 0;
-// }
-
 namespace Realm {
   namespace FPGA {
 
-    Logger log_fpga("fpga");
-
-    FPGADevice::FPGADevice() {
-      name = "";
+    namespace ThreadLocal {
+      static REALM_THREAD_LOCAL FPGAProcessor *current_fpga_proc = NULL;
     }
 
-    FPGADevice::FPGADevice(std::string name) : name(name) {
+    Logger log_fpga("fpga");
+
+    FPGADevice::FPGADevice(xrt::device *device, std::string name) : name(name) {
+      this->device = device;
     }
 
     FPGAModule::FPGAModule() : Module("fpga"), cfg_num_fpgas(0) {
@@ -34,7 +29,6 @@ namespace Realm {
       {
       Realm::CommandLineParser cp;
       cp.add_option_int("-ll:fpga", m->cfg_num_fpgas);
-      cp.add_option_string("-ll:xclbin", m->cfg_xclbin_path);
 
       bool ok = cp.parse_command_line(cmdline);
       if (!ok) {
@@ -43,8 +37,8 @@ namespace Realm {
       }}
 
       for (size_t i = 0; i < m->cfg_num_fpgas; i++) {
-        // template arguments must be known at compile time and const
-        FPGADevice *fpga_device = new FPGADevice("fpga" + std::to_string(i));
+        xrt::device *device_ptr = new xrt::device((unsigned int)i);
+        FPGADevice *fpga_device = new FPGADevice(device_ptr, "fpga" + std::to_string(i));
         m->fpga_devices.push_back(fpga_device);
       }
 
@@ -152,26 +146,29 @@ namespace Realm {
 
     template <typename T>
     bool FPGATaskScheduler<T>::execute_task(Task *task) {
+      assert(ThreadLocal::current_fpga_proc == NULL);
+      ThreadLocal::current_fpga_proc = fpga_proc_;
       log_fpga.info() << "execute_task " << task;
-      // add device to thread's xrt context
-      // XRTContext::xrt_device = fpga_proc_->xrt_device_;
       bool ok = T::execute_task(task);
+      assert(ThreadLocal::current_fpga_proc == fpga_proc_);
+      ThreadLocal::current_fpga_proc = NULL;
       return ok;
     }
 
     template <typename T>
     void FPGATaskScheduler<T>::execute_internal_task(InternalTask *task) {
+      assert(ThreadLocal::current_fpga_proc == NULL);
+      ThreadLocal::current_fpga_proc = fpga_proc_;
       log_fpga.info() << "execute_internal_task";
-      // add device to thread's xrt context
-      // XRTContext::xrt_device = fpga_proc_->xrt_device_;
-      // T::execute_internal_task(task);
+      T::execute_internal_task(task);
+      assert(ThreadLocal::current_fpga_proc == fpga_proc_);
+      ThreadLocal::current_fpga_proc = NULL;
     }
 
     FPGAProcessor::FPGAProcessor(FPGADevice *fpga_device, Processor me, Realm::CoreReservationSet& crs)
     : LocalTaskProcessor(me, Processor::FPGA_PROC)
     {
       log_fpga.info() << "FPGAProcessor()";
-      // xrt_device_ = xrt;
       this->fpga_device = fpga_device;
       Realm::CoreReservationParameters params;
       params.set_num_cores(1);
@@ -190,8 +187,14 @@ namespace Realm {
       set_scheduler(sched);
     }
 
-    FPGAProcessor::~FPGAProcessor(void) {
+    FPGAProcessor::~FPGAProcessor(void) 
+    {
       delete core_rsrv_;
+    }
+
+    FPGAProcessor *FPGAProcessor::get_current_fpga_proc(void) 
+    {
+      return ThreadLocal::current_fpga_proc;
     }
 
   }; // namespace FPGA
