@@ -60,29 +60,23 @@ void fpga_task(const void *args, size_t arglen,
     xclOpenContext(dev_handle, xclbin_uuid, (unsigned int)i, true);
   }
   size_t data_len = sizeof(int) * DATA_SIZE;
-  xclBufferHandle bo_in1 = xclAllocBO(dev_handle, data_len, 0, ARG_BANK);
-  xclBufferHandle bo_in2 = xclAllocBO(dev_handle, data_len, 0, ARG_BANK);
-  xclBufferHandle bo_out = xclAllocBO(dev_handle, data_len, 0, ARG_BANK);
+  xclBufferHandle bo_data = xclAllocBO(dev_handle, data_len * 3, 0, ARG_BANK);
   struct xclBOProperties bo_prop;
-  xclGetBOProperties(dev_handle, bo_in1, &bo_prop);
-  uint64_t p_in1 = bo_prop.paddr;
-  xclGetBOProperties(dev_handle, bo_in2, &bo_prop);
-  uint64_t p_in2 = bo_prop.paddr;
-  xclGetBOProperties(dev_handle, bo_out, &bo_prop);
-  uint64_t p_out = bo_prop.paddr;
-  int *data_in1 = (int *)xclMapBO(dev_handle, bo_in1, true);
-  int *data_in2 = (int *)xclMapBO(dev_handle, bo_in2, true);
-  int *data_out = (int *)xclMapBO(dev_handle, bo_out, true);
+  xclGetBOProperties(dev_handle, bo_data, &bo_prop);
+  uint64_t p_base = bo_prop.paddr;
+  uint64_t p_in1 = p_base;
+  uint64_t p_in2 = p_base + data_len;
+  uint64_t p_out = p_base + 2 * data_len;
+  int *data = (int *)xclMapBO(dev_handle, bo_data, true);
   int *expected = (int *)malloc(sizeof(int) * DATA_SIZE);
   // srand((unsigned int)time(NULL));
 	for (i = 0; i < DATA_SIZE; i++) {
-		data_in1[i] = 1; //rand();
-		data_in2[i] = 2; //rand();
-		expected[i] = data_in1[i] + data_in2[i];
+		data[i] = 1; //rand();
+		data[DATA_SIZE + i] = 2; //rand();
+		expected[i] = data[i] + data[DATA_SIZE + i];
+    data[2 * DATA_SIZE + i] = 0;
 	}
-  memset(data_out, 0, data_len);
-  xclSyncBO(dev_handle, bo_in1, XCL_BO_SYNC_BO_TO_DEVICE, data_len, 0);
-  xclSyncBO(dev_handle, bo_in2, XCL_BO_SYNC_BO_TO_DEVICE, data_len, 0);
+  xclSyncBO(dev_handle, bo_data, XCL_BO_SYNC_BO_TO_DEVICE, data_len * 3, 0);
   
   xclBufferHandle bo_cmd = xclAllocBO(dev_handle, (size_t)CMD_SIZE, 0, XCL_BO_FLAGS_EXECBUF);
   struct ert_start_kernel_cmd * start_cmd = (struct ert_start_kernel_cmd *)xclMapBO(dev_handle, bo_cmd, true);
@@ -107,10 +101,10 @@ void fpga_task(const void *args, size_t arglen,
   }
   printf("cmd_state = %d\n", cmd_packet->state);
 
-  xclSyncBO(dev_handle, bo_out, XCL_BO_SYNC_BO_FROM_DEVICE, data_len, 0);
+  xclSyncBO(dev_handle, bo_data, XCL_BO_SYNC_BO_FROM_DEVICE, data_len, data_len * 2);
 	for (i = 0; i < DATA_SIZE; i++) {
-		if (expected[i] != data_out[i]) {    
-      printf("expected=%d data_out=%d\n", expected[i], data_out[i]);
+		if (expected[i] != data[2 * DATA_SIZE + i]) {    
+      printf("expected=%d data_out=%d\n", expected[i], data[2 * DATA_SIZE + i]);
 			printf("data different !! (%lu)\n", i);
 			break;
 		}
@@ -119,13 +113,9 @@ void fpga_task(const void *args, size_t arglen,
 		printf("### OK ###\n");
 	}
 
-  xclUnmapBO(dev_handle, bo_in1, data_in1);
-  xclUnmapBO(dev_handle, bo_in2, data_in2);
-  xclUnmapBO(dev_handle, bo_out, data_out);
+  xclUnmapBO(dev_handle, bo_data, data);
   xclUnmapBO(dev_handle, bo_cmd, start_cmd);
-  xclFreeBO(dev_handle, bo_in1);
-  xclFreeBO(dev_handle, bo_in2);
-  xclFreeBO(dev_handle, bo_out);
+  xclFreeBO(dev_handle, bo_data);
   xclFreeBO(dev_handle, bo_cmd);
   for (i = 0; i < num_compute_units; i++) {
 		xclCloseContext(dev_handle, xclbin_uuid, (unsigned int)i);

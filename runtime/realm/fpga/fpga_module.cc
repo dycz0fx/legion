@@ -36,7 +36,14 @@ namespace Realm {
     FPGAModule::FPGAModule() : Module("fpga"), cfg_num_fpgas(0) {
     }
 
-    FPGAModule::~FPGAModule(void) {}
+    FPGAModule::~FPGAModule(void) {
+      if (!this->fpga_devices.empty()) {
+        for (size_t i = 0; i < fpga_devices.size(); i++) {
+          xclClose(fpga_devices[i]->dev_handle);
+          delete this->fpga_devices[i];
+        }
+      }
+    }
 
     Module *FPGAModule::create_module(RuntimeImpl *runtime, std::vector<std::string>& cmdline) {
       FPGAModule *m = new FPGAModule;
@@ -212,7 +219,7 @@ namespace Realm {
     {
       return ThreadLocal::current_fpga_proc;
     }
-    
+
     FPGADeviceMemory::FPGADeviceMemory(Memory memory, FPGADevice *device, size_t size) 
     : LocalManagedMemory(memory, size, MKIND_FPGA, 512, Memory::FPGA_MEM, NULL), device(device)
     {}
