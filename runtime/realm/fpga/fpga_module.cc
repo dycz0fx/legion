@@ -13,9 +13,25 @@ namespace Realm {
 
     Logger log_fpga("fpga");
 
-    FPGADevice::FPGADevice(xrt::device *device, std::string name) : name(name) {
-      this->device = device;
+    FPGADevice::FPGADevice(xclDeviceHandle dev_handle, std::string name) : name(name), cur_fpga_mem_bank(0) {
+      this->dev_handle = dev_handle;
     }
+
+    void create_fpga_mem(RuntimeImpl *runtime, size_t size) {
+    }
+
+    void FPGADevice::copy_to_fpga(off_t dst_offset, const void *src, size_t bytes) {
+      log_fpga.info() << "copy_to_dev: src = " << src << " dst_offset = " << dst_offset
+                      << " bytes = " << bytes << "\n";
+      
+    }
+
+    void FPGADevice::copy_from_fpga(void *dst, off_t src_offset, size_t bytes) {
+      log_fpga.info() << "copy_from_dev: dst = " << dst << " src_offset = " << src_offset
+                      << " bytes = " << bytes << "\n";
+      
+    }
+
 
     FPGAModule::FPGAModule() : Module("fpga"), cfg_num_fpgas(0) {
     }
@@ -37,8 +53,8 @@ namespace Realm {
       }}
 
       for (size_t i = 0; i < m->cfg_num_fpgas; i++) {
-        xrt::device *device_ptr = new xrt::device((unsigned int)i);
-        FPGADevice *fpga_device = new FPGADevice(device_ptr, "fpga" + std::to_string(i));
+        xclDeviceHandle dev_handle = xclOpen((unsigned int)i, NULL, XCL_QUIET);
+        FPGADevice *fpga_device = new FPGADevice(dev_handle, "fpga" + std::to_string(i));
         m->fpga_devices.push_back(fpga_device);
       }
 
@@ -196,6 +212,23 @@ namespace Realm {
     {
       return ThreadLocal::current_fpga_proc;
     }
+    
+    FPGADeviceMemory::FPGADeviceMemory(Memory memory, FPGADevice *device, size_t size) 
+    : LocalManagedMemory(memory, size, MKIND_FPGA, 512, Memory::FPGA_MEM, NULL), device(device)
+    {}
+
+    FPGADeviceMemory::~FPGADeviceMemory(void) {}
+
+    void FPGADeviceMemory::get_bytes(off_t offset, void *dst, size_t size)
+    {
+      get_device()->copy_from_fpga(dst, offset, size);
+    }
+
+    void FPGADeviceMemory::put_bytes(off_t offset, const void *src, size_t size)
+    {
+      get_device()->copy_to_fpga(offset, src, size);
+    }
+
 
   }; // namespace FPGA
 }; // namespace Realm

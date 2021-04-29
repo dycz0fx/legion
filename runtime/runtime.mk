@@ -681,7 +681,7 @@ ifeq ($(strip $(USE_FPGA)), 1)
   # provide this for backward-compatibility in applications
   CC_FLAGS            += -DUSE_FPGA
   FC_FLAGS	      += -DUSE_FPGA
-  LEGION_LD_FLAGS      += -lxrt_coreutil -luuid
+  LEGION_LD_FLAGS      += -lxrt_swemu -lxrt_core -lxrt_coreutil
   ifdef FPGA_ROOT
        CC_FLAGS    += -I$(FPGA_ROOT)/include
        FC_FLAGS    += -I$(FPGA_ROOT)/include

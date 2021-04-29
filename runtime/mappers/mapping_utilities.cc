@@ -1085,6 +1085,7 @@ namespace Legion {
           case Memory::LEVEL3_CACHE: return "LEVEL3_CACHE";
           case Memory::LEVEL2_CACHE: return "LEVEL2_CACHE";
           case Memory::LEVEL1_CACHE: return "LEVEL1_CACHE";
+          case Memory::FPGA_MEM: return "FPGA_MEM";
           default: assert(false); return "";
         }
       }

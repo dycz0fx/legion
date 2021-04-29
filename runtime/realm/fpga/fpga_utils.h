@@ -3,6 +3,6 @@
 
 #include "experimental/xrt_device.h"
 extern "C" {
-xrt::device *FPGAGetCurrentDevice(void);
+xclDeviceHandle FPGAGetCurrentDevice(void);
 }
 #endif // FPGA_UTILS_H

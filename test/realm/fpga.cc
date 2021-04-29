@@ -1,24 +1,25 @@
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+
 #include "realm.h"
 #include "realm/fpga/fpga_utils.h"
 
 // XRT includes
-#include "experimental/xrt_device.h"
-#include "experimental/xrt_kernel.h"
-#include "experimental/xrt_bo.h"
+#include "ert.h"
+#include "xrt.h"
+#include "xrt_mem.h"
 
 using namespace Realm;
 
-// // create device
-// auto device = xrt::device(device_index);
-// // load xclbin
-//  auto uuid = device.load_xclbin(xclbin_fnm);
-// // create kernel
-//  auto simple = xrt::kernel(device, uuid.get(), "simple");
-// // lauch kernel
-// auto run = simple(bo0, bo1, 0x10);
-//  run.wait();
+#define DATA_SIZE 1024
+#define ARG_BANK 1
+#define CMD_SIZE 4096
 
-static const int COUNT = 1024;
+#define ARG_IN1_OFFSET 0x10
+#define ARG_IN2_OFFSET 0x1c
+#define ARG_OUT_OFFSET 0x28
+#define ARG_SIZE_OFFSET 0x34
 
 // execute a task on FPGA Processor
 Logger log_app("app");
@@ -38,37 +39,98 @@ struct FPGAArgs {
 void fpga_task(const void *args, size_t arglen,
                 const void *userdata, size_t userlen, Processor p)
 {
+  size_t i;
   const FPGAArgs& local_args = *(const FPGAArgs *)args;
-  xrt::device *cur_device = FPGAGetCurrentDevice();
-  log_app.print() << "before loading xclbin " << local_args.xclbin;
-  std::cout << local_args.xclbin << std::endl;
-  xrt::uuid uuid = cur_device->load_xclbin(local_args.xclbin);
-  xrt::kernel simple = xrt::kernel(*cur_device, uuid.get(), "simple");
-  log_app.print() << "child task on " << p << " " << cur_device;
 
-  const size_t DATA_SIZE = COUNT * sizeof(int);
-  xrt::bo bo0 = xrt::bo(*cur_device, DATA_SIZE, simple.group_id(0));
-  xrt::bo bo1 = xrt::bo(*cur_device, DATA_SIZE, simple.group_id(1));
-  int bo0_map[COUNT];
-  int bo1_map[COUNT];
-  int expected_results[COUNT];
-  for (int i = 0; i < COUNT; i++) {
-    bo0_map[i] = local_args.a;
-    bo1_map[i] = local_args.b;
-    expected_results[i] = local_args.a * local_args.b + local_args.c;
+  //load xclbin
+  int fd = open(local_args.xclbin, O_RDONLY);
+  struct stat st;
+  fstat(fd, &st);
+  size_t xclbin_size = st.st_size;
+  struct axlf *xclbin = (struct axlf *)mmap(NULL, xclbin_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  uuid_t xclbin_uuid;
+  memcpy(xclbin_uuid, xclbin->m_header.uuid, sizeof(uuid_t));
+  xclDeviceHandle dev_handle = FPGAGetCurrentDevice();
+  xclLoadXclBin(dev_handle, (const struct axlf *)xclbin);
+  munmap(xclbin, xclbin_size);
+  close(fd);
+  
+  size_t num_compute_units = 4;
+  for (i = 0; i < num_compute_units; i++) {
+    xclOpenContext(dev_handle, xclbin_uuid, (unsigned int)i, true);
   }
-  bo0.write(bo0_map);
-  bo1.write(bo1_map);
-  bo0.sync(XCL_BO_SYNC_BO_TO_DEVICE, DATA_SIZE, 0);
-  bo1.sync(XCL_BO_SYNC_BO_TO_DEVICE, DATA_SIZE, 0);
-  xrt::run run = simple(bo0, bo1, local_args.c);
-  run.wait();
-  bo0.sync(XCL_BO_SYNC_BO_FROM_DEVICE, DATA_SIZE, 0);
-  bo0.read(bo0_map);
-  if (std::memcmp(bo0_map, expected_results, DATA_SIZE)) {
-    throw std::runtime_error("Value read back does not match reference");
+  size_t data_len = sizeof(int) * DATA_SIZE;
+  xclBufferHandle bo_in1 = xclAllocBO(dev_handle, data_len, 0, ARG_BANK);
+  xclBufferHandle bo_in2 = xclAllocBO(dev_handle, data_len, 0, ARG_BANK);
+  xclBufferHandle bo_out = xclAllocBO(dev_handle, data_len, 0, ARG_BANK);
+  struct xclBOProperties bo_prop;
+  xclGetBOProperties(dev_handle, bo_in1, &bo_prop);
+  uint64_t p_in1 = bo_prop.paddr;
+  xclGetBOProperties(dev_handle, bo_in2, &bo_prop);
+  uint64_t p_in2 = bo_prop.paddr;
+  xclGetBOProperties(dev_handle, bo_out, &bo_prop);
+  uint64_t p_out = bo_prop.paddr;
+  int *data_in1 = (int *)xclMapBO(dev_handle, bo_in1, true);
+  int *data_in2 = (int *)xclMapBO(dev_handle, bo_in2, true);
+  int *data_out = (int *)xclMapBO(dev_handle, bo_out, true);
+  int *expected = (int *)malloc(sizeof(int) * DATA_SIZE);
+  // srand((unsigned int)time(NULL));
+	for (i = 0; i < DATA_SIZE; i++) {
+		data_in1[i] = 1; //rand();
+		data_in2[i] = 2; //rand();
+		expected[i] = data_in1[i] + data_in2[i];
+	}
+  memset(data_out, 0, data_len);
+  xclSyncBO(dev_handle, bo_in1, XCL_BO_SYNC_BO_TO_DEVICE, data_len, 0);
+  xclSyncBO(dev_handle, bo_in2, XCL_BO_SYNC_BO_TO_DEVICE, data_len, 0);
+  
+  xclBufferHandle bo_cmd = xclAllocBO(dev_handle, (size_t)CMD_SIZE, 0, XCL_BO_FLAGS_EXECBUF);
+  struct ert_start_kernel_cmd * start_cmd = (struct ert_start_kernel_cmd *)xclMapBO(dev_handle, bo_cmd, true);
+  memset(start_cmd, 0, CMD_SIZE);
+  start_cmd->state = ERT_CMD_STATE_NEW;
+	start_cmd->opcode = ERT_START_CU;
+	start_cmd->stat_enabled = 1;
+	start_cmd->count = 1 + (ARG_SIZE_OFFSET/4 + 1) + 1;
+	start_cmd->cu_mask = (1 << num_compute_units )-1; 
+  start_cmd->data[ARG_IN1_OFFSET/4] = p_in1; 
+	start_cmd->data[ARG_IN1_OFFSET/4 + 1] = (p_in1 >> 32) & 0xFFFFFFFF;
+	start_cmd->data[ARG_IN2_OFFSET/4] = p_in2; 
+	start_cmd->data[ARG_IN2_OFFSET/4 + 1] = (p_in2 >> 32) & 0xFFFFFFFF;
+	start_cmd->data[ARG_OUT_OFFSET/4] = p_out; 
+	start_cmd->data[ARG_OUT_OFFSET/4 + 1] = (p_out >> 32) & 0xFFFFFFFF;
+	start_cmd->data[ARG_SIZE_OFFSET/4] = DATA_SIZE;
+
+  xclExecBuf(dev_handle, bo_cmd);
+  struct ert_packet * cmd_packet = (struct ert_packet *)start_cmd;
+  while (cmd_packet->state != ERT_CMD_STATE_COMPLETED) {
+    xclExecWait(dev_handle, 1000);
   }
-  log_app.print() << "child task success";
+  printf("cmd_state = %d\n", cmd_packet->state);
+
+  xclSyncBO(dev_handle, bo_out, XCL_BO_SYNC_BO_FROM_DEVICE, data_len, 0);
+	for (i = 0; i < DATA_SIZE; i++) {
+		if (expected[i] != data_out[i]) {    
+      printf("expected=%d data_out=%d\n", expected[i], data_out[i]);
+			printf("data different !! (%lu)\n", i);
+			break;
+		}
+	}
+	if (i == DATA_SIZE) {
+		printf("### OK ###\n");
+	}
+
+  xclUnmapBO(dev_handle, bo_in1, data_in1);
+  xclUnmapBO(dev_handle, bo_in2, data_in2);
+  xclUnmapBO(dev_handle, bo_out, data_out);
+  xclUnmapBO(dev_handle, bo_cmd, start_cmd);
+  xclFreeBO(dev_handle, bo_in1);
+  xclFreeBO(dev_handle, bo_in2);
+  xclFreeBO(dev_handle, bo_out);
+  xclFreeBO(dev_handle, bo_cmd);
+  for (i = 0; i < num_compute_units; i++) {
+		xclCloseContext(dev_handle, xclbin_uuid, (unsigned int)i);
+  }
+	// xclClose(dev_handle);
 }
 
 void top_level_task(const void *args, size_t arglen,
@@ -87,12 +149,11 @@ void top_level_task(const void *args, size_t arglen,
     if(pp.kind() != Processor::FPGA_PROC)
       continue;
     FPGAArgs fpga_args;
-    fpga_args.xclbin = "/home/xi/Programs/XRT/tests/xrt/build/opt/02_simple/kernel.xclbin";
+    fpga_args.xclbin = "/home/xi/Programs/FPGA/xilinx/vadd/src/kernel/vadd.xclbin";
     fpga_args.a = id;
     fpga_args.b = id+1;
     fpga_args.c = id+2;
     Event e = pp.spawn(FPGA_TASK, &fpga_args, sizeof(fpga_args));
-    // Event e = pp.spawn(FPGA_TASK, &id, sizeof(id));
     log_app.print() << "spawn fpga task " << id;
     id++;
 

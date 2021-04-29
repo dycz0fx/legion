@@ -6,18 +6,22 @@
 #include "realm/mem_impl.h"
 #include "realm/runtime_impl.h"
 
-// XRT includes
-#include "experimental/xrt_device.h"
-#include "experimental/xrt_kernel.h"
-#include "experimental/xrt_bo.h"
+// XCL includes
+#include "ert.h"
+#include "xrt.h"
+#include "xrt_mem.h"
 
 namespace Realm {
   namespace FPGA {
     class FPGADevice {
       public:
         std::string name;
-        xrt::device *device;
-        FPGADevice(xrt::device *device, std::string name);
+        xclDeviceHandle dev_handle;
+        int cur_fpga_mem_bank;
+        FPGADevice(xclDeviceHandle dev_handle, std::string name);
+        void create_fpga_mem(RuntimeImpl *runtime, size_t size);
+        void copy_to_fpga(off_t dst_offset, const void *src, size_t bytes);
+        void copy_from_fpga(void *dst, off_t src_offset, size_t bytes);
     };
 
     class FPGAProcessor : public LocalTaskProcessor {
@@ -28,6 +32,17 @@ namespace Realm {
         FPGADevice *fpga_device;
       protected:
         Realm::CoreReservation *core_rsrv_;
+    };
+
+    class FPGADeviceMemory : public LocalManagedMemory{
+      public:
+        FPGADeviceMemory(Memory memory, FPGADevice *device, size_t size);
+        virtual ~FPGADeviceMemory(void);
+        virtual void get_bytes(off_t offset, void *dst, size_t size);
+        virtual void put_bytes(off_t offset, const void *src, size_t size);
+
+        FPGADevice *get_device() const { return device; };
+        FPGADevice *device;
     };
 
     class FPGAModule : public Module {
