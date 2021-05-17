@@ -12,7 +12,7 @@
 
 using namespace Realm;
 
-#define DATA_SIZE 1024
+#define DATA_SIZE 10
 #define ARG_BANK 1
 #define CMD_SIZE 4096
 
@@ -20,6 +20,12 @@ using namespace Realm;
 #define ARG_IN2_OFFSET 0x1c
 #define ARG_OUT_OFFSET 0x28
 #define ARG_SIZE_OFFSET 0x34
+
+enum {
+  FID_X = 101,
+  FID_Y = 102,
+  FID_Z = 103,
+};
 
 // execute a task on FPGA Processor
 Logger log_app("app");
@@ -31,17 +37,31 @@ enum {
 
 struct FPGAArgs {
   const char* xclbin;
-  int a;
-  int b;
-  int c;
+  RegionInstance x_inst, y_inst, z_inst;
+  Rect<1> bounds;
 };
 
 void fpga_task(const void *args, size_t arglen,
                 const void *userdata, size_t userlen, Processor p)
 {
   size_t i;
+  
   const FPGAArgs& local_args = *(const FPGAArgs *)args;
+  size_t data_len = local_args.bounds.volume() * sizeof(int);
 
+  // get affine accessors for each of our three instances
+  AffineAccessor<int, 1> ra_x = AffineAccessor<int, 1>(local_args.x_inst,
+							   FID_X);
+  AffineAccessor<int, 1> ra_y = AffineAccessor<int, 1>(local_args.y_inst,
+							   FID_Y);
+  AffineAccessor<int, 1> ra_z = AffineAccessor<int, 1>(local_args.z_inst,
+							   FID_Z);
+  
+  log_app.print("x[0] = %d, y[0] = %d, z[0] = %d\n", ra_x[0], ra_y[0], ra_z[0]);
+  for (i = 0; i < DATA_SIZE; i++)
+    log_app.print("i = %lu ra_x = %p, ra_y = %p, ra_z = %p\n", i, ra_x.ptr(i), ra_y.ptr(i), ra_z.ptr(i));
+
+  
   //load xclbin
   int fd = open(local_args.xclbin, O_RDONLY);
   struct stat st;
@@ -59,24 +79,12 @@ void fpga_task(const void *args, size_t arglen,
   for (i = 0; i < num_compute_units; i++) {
     xclOpenContext(dev_handle, xclbin_uuid, (unsigned int)i, true);
   }
-  size_t data_len = sizeof(int) * DATA_SIZE;
-  xclBufferHandle bo_data = xclAllocBO(dev_handle, data_len * 3, 0, ARG_BANK);
-  struct xclBOProperties bo_prop;
-  xclGetBOProperties(dev_handle, bo_data, &bo_prop);
-  uint64_t p_base = bo_prop.paddr;
+
+  uint64_t p_base = (uint64_t)FPGAGetBasePtrDev();
   uint64_t p_in1 = p_base;
-  uint64_t p_in2 = p_base + data_len;
-  uint64_t p_out = p_base + 2 * data_len;
-  int *data = (int *)xclMapBO(dev_handle, bo_data, true);
-  int *expected = (int *)malloc(sizeof(int) * DATA_SIZE);
-  // srand((unsigned int)time(NULL));
-	for (i = 0; i < DATA_SIZE; i++) {
-		data[i] = 1; //rand();
-		data[DATA_SIZE + i] = 2; //rand();
-		expected[i] = data[i] + data[DATA_SIZE + i];
-    data[2 * DATA_SIZE + i] = 0;
-	}
-  xclSyncBO(dev_handle, bo_data, XCL_BO_SYNC_BO_TO_DEVICE, data_len * 3, 0);
+  uint64_t p_in2 = p_base + (uint64_t)ra_y.ptr(0) - (uint64_t)ra_x.ptr(0);
+  uint64_t p_out = p_base + (uint64_t)ra_z.ptr(0) - (uint64_t)ra_x.ptr(0);
+  log_app.print("!!!!!!!!!!!!p_in1 = %lu p_in2 = %lu p_out = %lu\n", p_in1, p_in2, p_out);
   
   xclBufferHandle bo_cmd = xclAllocBO(dev_handle, (size_t)CMD_SIZE, 0, XCL_BO_FLAGS_EXECBUF);
   struct ert_start_kernel_cmd * start_cmd = (struct ert_start_kernel_cmd *)xclMapBO(dev_handle, bo_cmd, true);
@@ -99,60 +107,193 @@ void fpga_task(const void *args, size_t arglen,
   while (cmd_packet->state != ERT_CMD_STATE_COMPLETED) {
     xclExecWait(dev_handle, 1000);
   }
-  printf("cmd_state = %d\n", cmd_packet->state);
+  printf("!!!!!!!!!!!!cmd_state = %d\n", cmd_packet->state);
 
-  xclSyncBO(dev_handle, bo_data, XCL_BO_SYNC_BO_FROM_DEVICE, data_len, data_len * 2);
-	for (i = 0; i < DATA_SIZE; i++) {
-		if (expected[i] != data[2 * DATA_SIZE + i]) {    
-      printf("expected=%d data_out=%d\n", expected[i], data[2 * DATA_SIZE + i]);
-			printf("data different !! (%lu)\n", i);
-			break;
-		}
-	}
-	if (i == DATA_SIZE) {
-		printf("### OK ###\n");
-	}
+  // xclSyncBO(dev_handle, bo_data, XCL_BO_SYNC_BO_FROM_DEVICE, data_len, data_len * 2);
+	// for (i = 0; i < DATA_SIZE; i++) {
+	// 	if (expected[i] != data[2 * DATA_SIZE + i]) {    
+  //     printf("expected=%d data_out=%d\n", expected[i], data[2 * DATA_SIZE + i]);
+	// 		printf("data different !! (%lu)\n", i);
+	// 		break;
+	// 	}
+	// }
+	// if (i == DATA_SIZE) {
+	// 	printf("### OK ###\n");
+	// }
 
-  xclUnmapBO(dev_handle, bo_data, data);
+  //xclUnmapBO(dev_handle, bo_data, data);
   xclUnmapBO(dev_handle, bo_cmd, start_cmd);
-  xclFreeBO(dev_handle, bo_data);
+  //xclFreeBO(dev_handle, bo_data);
   xclFreeBO(dev_handle, bo_cmd);
   for (i = 0; i < num_compute_units; i++) {
 		xclCloseContext(dev_handle, xclbin_uuid, (unsigned int)i);
   }
-	// xclClose(dev_handle);
+	//xclClose(dev_handle);
 }
 
 void top_level_task(const void *args, size_t arglen,
 		            const void *userdata, size_t userlen, Processor p)
 {
   log_app.print() << "top task running on " << p;
-  std::set<Event> finish_events;
   Machine machine = Machine::get_machine();
   std::set<Processor> all_processors;
   machine.get_all_processors(all_processors);
-  int id = 0;
   for(std::set<Processor>::const_iterator it = all_processors.begin();
       it != all_processors.end();
 	    it++) {
     Processor pp = (*it);
-    if(pp.kind() != Processor::FPGA_PROC)
-      continue;
-    FPGAArgs fpga_args;
-    fpga_args.xclbin = "/home/xi/Programs/FPGA/xilinx/vadd/src/kernel/vadd.xclbin";
-    fpga_args.a = id;
-    fpga_args.b = id+1;
-    fpga_args.c = id+2;
-    Event e = pp.spawn(FPGA_TASK, &fpga_args, sizeof(fpga_args));
-    log_app.print() << "spawn fpga task " << id;
-    id++;
+    if(pp.kind() == Processor::FPGA_PROC) {
+      Memory cpu_mem = Memory::NO_MEMORY; 
+      Memory fpga_mem = Memory::NO_MEMORY; 
+      std::set<Memory> visible_mems;
+      machine.get_visible_memories(pp, visible_mems);
+      for (std::set<Memory>::const_iterator it = visible_mems.begin();
+           it != visible_mems.end(); it++) {
+        if (it->kind() == Memory::FPGA_MEM) {
+          fpga_mem = *it;
+          log_app.print() << "fpga memory: " << *it << " capacity="
+                          << (it->capacity() >> 20) << " MB";
+        }
+        if (it->kind() == Memory::SYSTEM_MEM) {
+          cpu_mem = *it;
+          log_app.print() << "sys memory: " << *it << " capacity="
+                          << (it->capacity() >> 20) << " MB";
+        }
+      }
 
-    finish_events.insert(e);
+      int init_x_value = 1;
+      int init_y_value = 2;
+      int init_z_value = 9;
+
+      Rect<1> bounds(0, DATA_SIZE-1);
+
+      std::map<FieldID, size_t> field_sizes;
+      field_sizes[FID_X] = sizeof(int);
+      field_sizes[FID_Y] = sizeof(int);
+      field_sizes[FID_Z] = sizeof(int);
+      
+      RegionInstance cpu_inst;
+      RegionInstance::create_instance(cpu_inst, cpu_mem,
+                                      bounds, field_sizes,
+                                      0 /*SOA*/, ProfilingRequestSet()).wait();
+      log_app.print() << "created cpu memory instance: " << cpu_inst;
+
+      CopySrcDstField cpu_x_field, cpu_y_field, cpu_z_field;
+      cpu_x_field.inst = cpu_inst;
+      cpu_x_field.field_id = FID_X;
+      cpu_x_field.size = sizeof(int);
+
+      cpu_y_field.inst = cpu_inst;
+      cpu_y_field.field_id = FID_Y;
+      cpu_y_field.size = sizeof(int);
+
+      cpu_z_field.inst = cpu_inst;
+      cpu_z_field.field_id = FID_Z;
+      cpu_z_field.size = sizeof(int);
+
+      RegionInstance fpga_inst;
+      RegionInstance::create_instance(fpga_inst, fpga_mem,
+                                      bounds, field_sizes,
+                                      0 /*SOA*/, ProfilingRequestSet()).wait();
+      log_app.print() << "created fpga memory instance: " << fpga_inst;
+
+      CopySrcDstField fpga_x_field, fpga_y_field, fpga_z_field;
+      fpga_x_field.inst = fpga_inst;
+      fpga_x_field.field_id = FID_X;
+      fpga_x_field.size = sizeof(int);
+
+      fpga_y_field.inst = fpga_inst;
+      fpga_y_field.field_id = FID_Y;
+      fpga_y_field.size = sizeof(int);
+
+      fpga_z_field.inst = fpga_inst;
+      fpga_z_field.field_id = FID_Z;
+      fpga_z_field.size = sizeof(int);
+
+      AffineAccessor<int, 1> cpu_ra_x = AffineAccessor<int, 1>(cpu_inst, FID_X);
+      AffineAccessor<int, 1> fpga_ra_x = AffineAccessor<int, 1>(fpga_inst, FID_X);
+      
+      //Test fill: fill fpga memory directly
+      Event fill_x;
+      {
+        std::vector<CopySrcDstField> fill_vec;
+        fill_vec.push_back(fpga_x_field);
+        fill_x = bounds.fill(fill_vec, ProfilingRequestSet(),
+          &init_x_value, sizeof(init_x_value));
+      }
+      fill_x.wait();
+
+      // Event fill_y;
+      // {
+      //   std::vector<CopySrcDstField> fill_vec;
+      //   fill_vec.push_back(fpga_y_field);
+      //   fill_y = bounds.fill(fill_vec, ProfilingRequestSet(),
+      //     &init_y_value, sizeof(init_y_value));
+      // }
+      // fill_y.wait();
+      
+      Event fill_z;
+      {
+        std::vector<CopySrcDstField> fill_vec;
+        fill_vec.push_back(fpga_z_field);
+        fill_z = bounds.fill(fill_vec, ProfilingRequestSet(),
+          &init_z_value, sizeof(init_z_value));
+      }
+      fill_z.wait();
+
+      fill cpu mem and copy to fpga mem
+      Event fill_y_cpu;
+      {
+        std::vector<CopySrcDstField> fill_vec;
+        fill_vec.push_back(cpu_y_field);
+        fill_y_cpu = bounds.fill(fill_vec, ProfilingRequestSet(),
+          &init_y_value, sizeof(init_y_value));
+      }
+      fill_y_cpu.wait();
+
+      Event copy_y;
+      {
+        std::vector<CopySrcDstField> srcs, dsts;
+        srcs.push_back(cpu_y_field);
+        dsts.push_back(fpga_y_field);
+        copy_y = bounds.copy(srcs, dsts, ProfilingRequestSet());
+      }
+      copy_y.wait();
+
+      FPGAArgs fpga_args;
+      fpga_args.xclbin = "/home/xi/Programs/FPGA/xilinx/vadd/src/kernel/vadd.xclbin";
+      fpga_args.x_inst = fpga_inst;
+      fpga_args.y_inst= fpga_inst;
+      fpga_args.z_inst = fpga_inst;
+      fpga_args.bounds = bounds;
+      Event e = pp.spawn(FPGA_TASK, &fpga_args, sizeof(fpga_args));
+
+      // Copy back
+      Event z_ready;
+      {
+        std::vector<CopySrcDstField> srcs, dsts;
+        srcs.push_back(fpga_z_field);
+        dsts.push_back(cpu_z_field);
+        z_ready = bounds.copy(srcs, dsts, ProfilingRequestSet(), e);
+      }
+      z_ready.wait();
+
+      AffineAccessor<int, 1> ra_z = AffineAccessor<int, 1>(cpu_inst, FID_Z);
+      int i;
+      for (i = bounds.lo; i <= bounds.hi; i++)
+      {
+        printf("%d ", ra_z[i]);
+        // if (3 != ra_z[i]) {    
+        //   printf("!!!!!!!!!!!!!!!i = %d expected=%d data_out=%d\n", i, 3, ra_z[i]);
+        //   break;
+        // }
+      }
+      printf("\n");
+      if (i == bounds.hi + 1) {
+        printf("=======OK=========\n");
+      }
+    }
   }
-
-  Event merged = Event::merge_events(finish_events);
-
-  merged.wait();
 
   log_app.print() << "all done!";
 }

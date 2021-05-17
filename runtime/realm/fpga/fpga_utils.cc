@@ -18,4 +18,11 @@ extern "C" {
     log_fpga.info() << "FPGAGetCurrentDevice()";
     return ret;
   }
+
+  REALM_PUBLIC_API void *FPGAGetBasePtrDev(void) {
+    FPGAProcessor *p = FPGAProcessor::get_current_fpga_proc();
+    xclDeviceHandle ret = p->fpga_device->fpga_mem->base_ptr_dev;
+    log_fpga.info() << "FPGAGetBasePtrDev()";
+    return ret;
+  }
 }
