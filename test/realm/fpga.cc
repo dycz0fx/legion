@@ -50,7 +50,6 @@ void fpga_task(const void *args, size_t arglen,
   size_t i;
 
   const FPGAArgs &local_args = *(const FPGAArgs *)args;
-  size_t data_len = local_args.bounds.volume() * sizeof(int);
 
   // get affine accessors for each of our three instances
   AffineAccessor<int, 1> ra_x = AffineAccessor<int, 1>(local_args.x_inst,
@@ -79,10 +78,12 @@ void fpga_task(const void *args, size_t arglen,
     xclOpenContext(dev_handle, xclbin_uuid, (unsigned int)i, true);
   }
 
-  uint64_t p_base = (uint64_t)FPGAGetBasePtrDev();
-  uint64_t p_in1 = p_base;
-  uint64_t p_in2 = p_base + (uint64_t)ra_y.ptr(0) - (uint64_t)ra_x.ptr(0);
-  uint64_t p_out = p_base + (uint64_t)ra_z.ptr(0) - (uint64_t)ra_x.ptr(0);
+  uint64_t p_base_dev = (uint64_t)FPGAGetBasePtrDev();
+  uint64_t p_base_sys = (uint64_t)FPGAGetBasePtrSys();
+  uint64_t p_in1 = p_base_dev + (uint64_t)ra_x.ptr(0) - p_base_sys;
+  uint64_t p_in2 = p_base_dev + (uint64_t)ra_y.ptr(0) - p_base_sys;
+  uint64_t p_out = p_base_dev + (uint64_t)ra_z.ptr(0) - p_base_sys;
+  log_app.print("ra_x = %p ra_y = %p ra_z = %p\n", ra_x.ptr(0), ra_y.ptr(0), ra_z.ptr(0));
   log_app.print("p_in1 = %lu p_in2 = %lu p_out = %lu\n", p_in1, p_in2, p_out);
 
   xclBufferHandle bo_cmd = xclAllocBO(dev_handle, (size_t)CMD_SIZE, 0, XCL_BO_FLAGS_EXECBUF);
@@ -202,8 +203,31 @@ void top_level_task(const void *args, size_t arglen,
       fpga_z_field.field_id = FID_Z;
       fpga_z_field.size = sizeof(int);
 
+      RegionInstance fpga_inst_2;
+      RegionInstance::create_instance(fpga_inst_2, fpga_mem,
+                                      bounds, field_sizes,
+                                      0 /*SOA*/, ProfilingRequestSet())
+          .wait();
+      log_app.print() << "created fpga memory instance: " << fpga_inst_2;
+
+      CopySrcDstField fpga_x_field_2, fpga_y_field_2, fpga_z_field_2;
+      fpga_x_field_2.inst = fpga_inst_2;
+      fpga_x_field_2.field_id = FID_X;
+      fpga_x_field_2.size = sizeof(int);
+
+      fpga_y_field_2.inst = fpga_inst_2;
+      fpga_y_field_2.field_id = FID_Y;
+      fpga_y_field_2.size = sizeof(int);
+
+      fpga_z_field_2.inst = fpga_inst_2;
+      fpga_z_field_2.field_id = FID_Z;
+      fpga_z_field_2.size = sizeof(int);
+
       AffineAccessor<int, 1> cpu_ra_x = AffineAccessor<int, 1>(cpu_inst, FID_X);
       AffineAccessor<int, 1> fpga_ra_x = AffineAccessor<int, 1>(fpga_inst, FID_X);
+      AffineAccessor<int, 1> fpga_ra_x_2 = AffineAccessor<int, 1>(fpga_inst_2, FID_X);
+      AffineAccessor<int, 1> fpga_ra_z_2 = AffineAccessor<int, 1>(fpga_inst_2, FID_Z);
+      log_app.print("cpu_ra_x = %p fpga_ra_x = %p fpga_ra_x_2 = %p fpga_ra_z_2 = %p\n", cpu_ra_x.ptr(0), fpga_ra_x.ptr(0), fpga_ra_x_2.ptr(0), fpga_ra_z_2.ptr(0));
 
       //Test fill: fill fpga memory directly
       Event fill_x;
@@ -214,6 +238,14 @@ void top_level_task(const void *args, size_t arglen,
                              &init_x_value, sizeof(init_x_value));
       }
       fill_x.wait();
+      {
+        std::vector<CopySrcDstField> fill_vec;
+        fill_vec.push_back(fpga_x_field_2);
+        fill_x = bounds.fill(fill_vec, ProfilingRequestSet(),
+                             &init_x_value, sizeof(init_x_value));
+      }
+      fill_x.wait();
+
 
       // Event fill_y;
       // {
@@ -232,8 +264,15 @@ void top_level_task(const void *args, size_t arglen,
                              &init_z_value, sizeof(init_z_value));
       }
       fill_z.wait();
+      {
+        std::vector<CopySrcDstField> fill_vec;
+        fill_vec.push_back(fpga_z_field_2);
+        fill_z = bounds.fill(fill_vec, ProfilingRequestSet(),
+                             &init_z_value, sizeof(init_z_value));
+      }
+      fill_z.wait();
 
-      fill cpu mem and copy to fpga mem
+      // fill cpu mem and copy to fpga mem
           Event fill_y_cpu;
       {
         std::vector<CopySrcDstField> fill_vec;
@@ -251,12 +290,19 @@ void top_level_task(const void *args, size_t arglen,
         copy_y = bounds.copy(srcs, dsts, ProfilingRequestSet());
       }
       copy_y.wait();
+      {
+        std::vector<CopySrcDstField> srcs, dsts;
+        srcs.push_back(cpu_y_field);
+        dsts.push_back(fpga_y_field_2);
+        copy_y = bounds.copy(srcs, dsts, ProfilingRequestSet());
+      }
+      copy_y.wait();
 
       FPGAArgs fpga_args;
       fpga_args.xclbin = "/home/xi/Programs/FPGA/xilinx/vadd/src/kernel/vadd.xclbin";
       fpga_args.x_inst = fpga_inst;
       fpga_args.y_inst = fpga_inst;
-      fpga_args.z_inst = fpga_inst;
+      fpga_args.z_inst = fpga_inst_2;
       fpga_args.bounds = bounds;
       Event e = pp.spawn(FPGA_TASK, &fpga_args, sizeof(fpga_args));
 
@@ -264,13 +310,11 @@ void top_level_task(const void *args, size_t arglen,
       Event z_ready;
       {
         std::vector<CopySrcDstField> srcs, dsts;
-        srcs.push_back(fpga_z_field);
+        srcs.push_back(fpga_z_field_2);
         dsts.push_back(cpu_z_field);
         z_ready = bounds.copy(srcs, dsts, ProfilingRequestSet(), e);
       }
       z_ready.wait();
-
-      int *expected[DATA_SIZE] = 0;
 
       AffineAccessor<int, 1> ra_z = AffineAccessor<int, 1>(cpu_inst, FID_Z);
       int i;

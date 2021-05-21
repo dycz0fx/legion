@@ -5,6 +5,7 @@
 extern "C"
 {
   xclDeviceHandle FPGAGetCurrentDevice(void);
+  void *FPGAGetBasePtrSys(void);
   void *FPGAGetBasePtrDev(void);
 }
 #endif // FPGA_UTILS_H

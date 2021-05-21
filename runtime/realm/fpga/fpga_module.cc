@@ -155,7 +155,7 @@ namespace Realm
                      bytes, 1);
       xclSyncBO(this->dev_handle, this->bo_handle, XCL_BO_SYNC_BO_TO_DEVICE, bytes, dst_offset);
       printf("copy_to_fpga: ");
-      for (int i = 0; i < 30; i++)
+      for (int i = 0; i < 24; i++)
       {
         printf("%d ", ((int *)fpga_mem->base_ptr_sys)[i]);
       }
@@ -170,12 +170,12 @@ namespace Realm
       log_fpga.info() << "copy_from_fpga: dst = " << dst << " src_offset = " << src_offset
                       << " bytes = " << bytes << " src = " << temp << "\n";
       // xclSyncBO(this->dev_handle, this->bo_handle, XCL_BO_SYNC_BO_FROM_DEVICE, bytes, src_offset);
-      xclSyncBO(this->dev_handle, this->bo_handle, XCL_BO_SYNC_BO_FROM_DEVICE, 120, 0);
+      xclSyncBO(this->dev_handle, this->bo_handle, XCL_BO_SYNC_BO_FROM_DEVICE, bytes, src_offset);
       fpga_memcpy_2d(reinterpret_cast<uintptr_t>(dst), 0,
                      reinterpret_cast<uintptr_t>(src), 0,
                      bytes, 1);
       printf("copy_from_fpga: ");
-      for (int i = 0; i < 30; i++)
+      for (int i = 0; i < 24; i++)
       {
         printf("%d ", ((int *)fpga_mem->base_ptr_sys)[i]);
       }
