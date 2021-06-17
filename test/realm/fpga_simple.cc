@@ -203,31 +203,8 @@ void top_level_task(const void *args, size_t arglen,
       fpga_z_field.field_id = FID_Z;
       fpga_z_field.size = sizeof(int);
 
-      RegionInstance fpga_inst_2;
-      RegionInstance::create_instance(fpga_inst_2, fpga_mem,
-                                      bounds, field_sizes,
-                                      0 /*SOA*/, ProfilingRequestSet())
-          .wait();
-      log_app.print() << "created fpga memory instance: " << fpga_inst_2;
-
-      CopySrcDstField fpga_x_field_2, fpga_y_field_2, fpga_z_field_2;
-      fpga_x_field_2.inst = fpga_inst_2;
-      fpga_x_field_2.field_id = FID_X;
-      fpga_x_field_2.size = sizeof(int);
-
-      fpga_y_field_2.inst = fpga_inst_2;
-      fpga_y_field_2.field_id = FID_Y;
-      fpga_y_field_2.size = sizeof(int);
-
-      fpga_z_field_2.inst = fpga_inst_2;
-      fpga_z_field_2.field_id = FID_Z;
-      fpga_z_field_2.size = sizeof(int);
-
       AffineAccessor<int, 1> cpu_ra_x = AffineAccessor<int, 1>(cpu_inst, FID_X);
       AffineAccessor<int, 1> fpga_ra_x = AffineAccessor<int, 1>(fpga_inst, FID_X);
-      AffineAccessor<int, 1> fpga_ra_x_2 = AffineAccessor<int, 1>(fpga_inst_2, FID_X);
-      AffineAccessor<int, 1> fpga_ra_z_2 = AffineAccessor<int, 1>(fpga_inst_2, FID_Z);
-      log_app.print("cpu_ra_x = %p fpga_ra_x = %p fpga_ra_x_2 = %p fpga_ra_z_2 = %p\n", cpu_ra_x.ptr(0), fpga_ra_x.ptr(0), fpga_ra_x_2.ptr(0), fpga_ra_z_2.ptr(0));
 
       //Test fill: fill fpga memory directly
       Event fill_x;
@@ -238,23 +215,7 @@ void top_level_task(const void *args, size_t arglen,
                              &init_x_value, sizeof(init_x_value));
       }
       fill_x.wait();
-      {
-        std::vector<CopySrcDstField> fill_vec;
-        fill_vec.push_back(fpga_x_field_2);
-        fill_x = bounds.fill(fill_vec, ProfilingRequestSet(),
-                             &init_x_value, sizeof(init_x_value));
-      }
-      fill_x.wait();
 
-
-      // Event fill_y;
-      // {
-      //   std::vector<CopySrcDstField> fill_vec;
-      //   fill_vec.push_back(fpga_y_field);
-      //   fill_y = bounds.fill(fill_vec, ProfilingRequestSet(),
-      //     &init_y_value, sizeof(init_y_value));
-      // }
-      // fill_y.wait();
 
       Event fill_z;
       {
@@ -264,16 +225,9 @@ void top_level_task(const void *args, size_t arglen,
                              &init_z_value, sizeof(init_z_value));
       }
       fill_z.wait();
-      {
-        std::vector<CopySrcDstField> fill_vec;
-        fill_vec.push_back(fpga_z_field_2);
-        fill_z = bounds.fill(fill_vec, ProfilingRequestSet(),
-                             &init_z_value, sizeof(init_z_value));
-      }
-      fill_z.wait();
 
       // fill cpu mem and copy to fpga mem
-          Event fill_y_cpu;
+      Event fill_y_cpu;
       {
         std::vector<CopySrcDstField> fill_vec;
         fill_vec.push_back(cpu_y_field);
@@ -290,19 +244,12 @@ void top_level_task(const void *args, size_t arglen,
         copy_y = bounds.copy(srcs, dsts, ProfilingRequestSet());
       }
       copy_y.wait();
-      {
-        std::vector<CopySrcDstField> srcs, dsts;
-        srcs.push_back(cpu_y_field);
-        dsts.push_back(fpga_y_field_2);
-        copy_y = bounds.copy(srcs, dsts, ProfilingRequestSet());
-      }
-      copy_y.wait();
 
       FPGAArgs fpga_args;
       fpga_args.xclbin = "/home/xi/Programs/FPGA/xilinx/vadd/src/kernel/vadd.xclbin";
       fpga_args.x_inst = fpga_inst;
       fpga_args.y_inst = fpga_inst;
-      fpga_args.z_inst = fpga_inst_2;
+      fpga_args.z_inst = fpga_inst;
       fpga_args.bounds = bounds;
       Event e = pp.spawn(FPGA_TASK, &fpga_args, sizeof(fpga_args));
 
@@ -310,7 +257,7 @@ void top_level_task(const void *args, size_t arglen,
       Event z_ready;
       {
         std::vector<CopySrcDstField> srcs, dsts;
-        srcs.push_back(fpga_z_field_2);
+        srcs.push_back(fpga_z_field);
         dsts.push_back(cpu_z_field);
         z_ready = bounds.copy(srcs, dsts, ProfilingRequestSet(), e);
       }
@@ -323,10 +270,6 @@ void top_level_task(const void *args, size_t arglen,
         printf("%d ", ra_z[i]);
       }
       printf("\n");
-      if (i == bounds.hi + 1)
-      {
-        printf("=======OK=========\n");
-      }
     }
   }
 

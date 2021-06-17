@@ -154,12 +154,17 @@ namespace Realm
                      reinterpret_cast<uintptr_t>(src), 0,
                      bytes, 1);
       xclSyncBO(this->dev_handle, this->bo_handle, XCL_BO_SYNC_BO_TO_DEVICE, bytes, dst_offset);
-      printf("copy_to_fpga: ");
-      for (int i = 0; i < 24; i++)
-      {
-        printf("%d ", ((int *)fpga_mem->base_ptr_sys)[i]);
-      }
-      printf("\n");
+      // printf("copy_to_fpga: ");
+      // for (int i = 0; i < 6000; i++)
+      // {
+      //   if (((char *)fpga_mem->base_ptr_sys)[i] == '\0') {
+      //     printf("_");
+      //   }
+      //   else {
+      //     printf("%c", ((char *)fpga_mem->base_ptr_sys)[i]);
+      //   }
+      // }
+      // printf("\n");
       notification->request_completed();
     }
 
@@ -174,12 +179,17 @@ namespace Realm
       fpga_memcpy_2d(reinterpret_cast<uintptr_t>(dst), 0,
                      reinterpret_cast<uintptr_t>(src), 0,
                      bytes, 1);
-      printf("copy_from_fpga: ");
-      for (int i = 0; i < 24; i++)
-      {
-        printf("%d ", ((int *)fpga_mem->base_ptr_sys)[i]);
-      }
-      printf("\n");
+      // printf("copy_from_fpga: ");
+      // for (int i = 0; i < 6000; i++)
+      // {
+      //   if (((char *)fpga_mem->base_ptr_sys)[i] == '\0') {
+      //     printf("_");
+      //   }
+      //   else {
+      //     printf("%c", ((char *)fpga_mem->base_ptr_sys)[i]);
+      //   }
+      // }
+      // printf("\n");
       notification->request_completed();
     }
 
