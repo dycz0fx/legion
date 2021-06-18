@@ -46,7 +46,6 @@ enum
 
 struct DEFLATE_Args
 {
-  const char *xclbin;
   RegionInstance deflate_in_inst, deflate_out_inst;
   Rect<1> bounds;
   size_t size;
@@ -54,7 +53,6 @@ struct DEFLATE_Args
 
 struct INFLATE_Args
 {
-  const char *xclbin;
   RegionInstance inflate_in_inst, inflate_out_inst;
   Rect<1> bounds;
 };
@@ -73,7 +71,7 @@ void deflate_task(const void *args, size_t arglen,
                                                        FID_DEFLATE_OUT);
 
   //load xclbin
-  int fd = open(local_args.xclbin, O_RDONLY);
+  int fd = open(DEFLATE_XCLBIN, O_RDONLY);
   struct stat st;
   fstat(fd, &st);
   size_t xclbin_size = st.st_size;
@@ -142,7 +140,7 @@ void inflate_task(const void *args, size_t arglen,
                                                        FID_INFLATE_OUT);
   
   //load xclbin
-  int fd = open(local_args.xclbin, O_RDONLY);
+  int fd = open(INFLATE_XCLBIN, O_RDONLY);
   struct stat st;
   fstat(fd, &st);
   size_t xclbin_size = st.st_size;
@@ -203,11 +201,54 @@ void top_level_task(const void *args, size_t arglen,
   Machine machine = Machine::get_machine();
   std::set<Processor> all_processors;
   machine.get_all_processors(all_processors);
+  std::set<Processor> local_processors;
+  machine.get_local_processors(local_processors);
+  std::vector<Processor> remote_processors;
+  std::vector<Memory> remote_fpga_mems;
+  std::vector<Memory> remote_sys_mems;
   for (std::set<Processor>::const_iterator it = all_processors.begin();
        it != all_processors.end();
        it++)
   {
     Processor pp = (*it);
+    log_app.print() << "[all] processor " << pp << " kind " << pp.kind() << " address_space " << pp.address_space();
+    if (pp.kind() == Processor::FPGA_PROC and local_processors.find(pp) == local_processors.end())
+    {
+      remote_processors.push_back(pp);
+    }
+  }
+  for (std::vector<Processor>::const_iterator it = remote_processors.begin();
+      it != remote_processors.end();
+      it++)
+  {
+    Processor pp = (*it);
+    log_app.print() << "[remote] processor " << pp << " kind " << pp.kind() << " address_space " << pp.address_space();
+    std::set<Memory> visible_mems;
+    machine.get_visible_memories(pp, visible_mems);
+    for (std::set<Memory>::const_iterator it = visible_mems.begin();
+          it != visible_mems.end(); it++)
+    {
+      if (it->kind() == Memory::FPGA_MEM)
+      {
+        remote_fpga_mems.push_back(*it);
+        log_app.print() << "[remote] fpga memory: " << *it << " capacity="
+                        << (it->capacity() >> 20) << " MB";
+      }
+      if (it->kind() == Memory::SYSTEM_MEM)
+      {
+        remote_sys_mems.push_back(*it);
+        log_app.print() << "[remote] sys memory: " << *it << " capacity="
+                        << (it->capacity() >> 20) << " MB";
+      }
+    }
+
+  }
+  for (std::set<Processor>::const_iterator it = local_processors.begin();
+       it != local_processors.end();
+       it++)
+  {
+    Processor pp = (*it);
+    log_app.print() << "[local] processor " << pp << " kind " << pp.kind() << " address_space " << pp.address_space();
     if (pp.kind() == Processor::FPGA_PROC)
     {
       Memory cpu_mem = Memory::NO_MEMORY;
@@ -288,7 +329,6 @@ void top_level_task(const void *args, size_t arglen,
       copy_deflate_in.wait();
 
       DEFLATE_Args deflate_args;
-      deflate_args.xclbin = DEFLATE_XCLBIN;
       deflate_args.deflate_in_inst = deflate_fpga_inst;
       deflate_args.deflate_out_inst = deflate_fpga_inst;
       deflate_args.bounds = bounds;
@@ -328,7 +368,7 @@ void top_level_task(const void *args, size_t arglen,
       inflate_field_sizes[FID_INFLATE_OUT] = sizeof(char);
 
       RegionInstance inflate_cpu_inst;
-      RegionInstance::create_instance(inflate_cpu_inst, cpu_mem,
+      RegionInstance::create_instance(inflate_cpu_inst, remote_sys_mems[0],
                                       bounds, inflate_field_sizes,
                                       0 /*SOA*/, ProfilingRequestSet())
           .wait();
@@ -344,7 +384,7 @@ void top_level_task(const void *args, size_t arglen,
       cpu_inflate_out_field.size = sizeof(char);
 
       RegionInstance inflate_fpga_inst;
-      RegionInstance::create_instance(inflate_fpga_inst, fpga_mem,
+      RegionInstance::create_instance(inflate_fpga_inst, remote_fpga_mems[0],
                                       bounds, inflate_field_sizes,
                                       0 /*SOA*/, ProfilingRequestSet())
           .wait();
@@ -378,11 +418,10 @@ void top_level_task(const void *args, size_t arglen,
       copy_inflate_in.wait();
 
       INFLATE_Args inflate_args;
-      inflate_args.xclbin = INFLATE_XCLBIN;
       inflate_args.inflate_in_inst = inflate_fpga_inst;
       inflate_args.inflate_out_inst = inflate_fpga_inst;
       inflate_args.bounds = bounds;
-      e = pp.spawn(INFLATE_TASK, &inflate_args, sizeof(inflate_args));
+      e = remote_processors[0].spawn(INFLATE_TASK, &inflate_args, sizeof(inflate_args));
 
       // Copy back
       Event copy_inflate_out;
@@ -393,8 +432,16 @@ void top_level_task(const void *args, size_t arglen,
         copy_inflate_out = bounds.copy(srcs, dsts, ProfilingRequestSet(), e);
       }
       copy_inflate_out.wait();
-
-      AffineAccessor<char, 1> cpu_ra_inflate_out = AffineAccessor<char, 1>(inflate_cpu_inst, FID_INFLATE_OUT);
+      Event copy_inflate_to_deflate;
+      {
+        std::vector<CopySrcDstField> srcs, dsts;
+        srcs.push_back(cpu_inflate_out_field);
+        dsts.push_back(cpu_deflate_out_field);
+        copy_inflate_to_deflate = bounds.copy(srcs, dsts, ProfilingRequestSet());
+      }
+      copy_inflate_to_deflate.wait();
+      
+      AffineAccessor<char, 1> cpu_ra_inflate_out = AffineAccessor<char, 1>(deflate_cpu_inst, FID_DEFLATE_OUT);
       i = bounds.lo;
       while (cpu_ra_inflate_out[i] != '\0') {
         printf("%c", cpu_ra_inflate_out[i]);
@@ -409,6 +456,7 @@ void top_level_task(const void *args, size_t arglen,
 
 int main(int argc, char **argv)
 {
+  sleep(20);
   // the text need to be compressed
   const char *text =
     "To evaluate our prefetcher we modelled the system using the gem5 simulator [4] in full system mode with the setup "
