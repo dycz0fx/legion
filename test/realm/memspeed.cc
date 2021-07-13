@@ -60,14 +60,16 @@ void copy_profiling_task(const void *args, size_t arglen,
 
 namespace TestConfig {
   size_t buffer_size = 64 << 20; // should be bigger than any cache in system
-  bool do_tasks = true;   // should tasks accessing memories be tested
-  bool do_copies = true;  // should DMAs between memories be tested
+  bool do_tasks = false;   // should tasks accessing memories be tested
+  bool do_copies = false;  // should DMAs between memories be tested
   int copy_reps = 0;      // if nonzero, average over #reps copies
   int copy_fields = 1;    // number of distinct fields to copy
   size_t sparse_chunk = 0;  // if nonzero, test sparse copies with chunk size
   size_t sparse_gap = 16;   // gap between sparse chunks (if used)
   bool copy_aos = false;   // if true, use an AOS memory layout
   bool slow_mems = false;  // show slow memories be tested?
+  bool do_contention = true;
+  size_t max_peers;
 };
 
 void memspeed_cpu_task(const void *args, size_t arglen, 
@@ -240,7 +242,7 @@ void top_level_task(const void *args, size_t arglen,
     size_t capacity = m.capacity();
     // we need two instances if we're doing copy testing
     if(capacity < (TestConfig::buffer_size *
-		   (TestConfig::do_copies ? 2*TestConfig::copy_fields : 1))) {
+		   ((TestConfig::do_copies or TestConfig::do_contention) ? 2*TestConfig::copy_fields : 1))) {
       log_app.info() << "skipping memory " << m << " (kind=" << m.kind() << ") - insufficient capacity";
       continue;
     }
@@ -473,12 +475,256 @@ void top_level_task(const void *args, size_t arglen,
     }
   }
 
+  if (TestConfig::do_contention)
+  {
+    std::map<FieldID, size_t> field_sizes;
+    for (int i = 0; i < TestConfig::copy_fields; i++)
+      field_sizes[FID_BASE + i] = sizeof(void *);
+
+    for (std::vector<Memory>::const_iterator it = memories.begin();
+         it != memories.end();
+         ++it)
+    {
+      Memory m1 = *it;
+
+      std::vector<RegionInstance> inst_list1(TestConfig::max_peers);
+      for (size_t t = 0; t < TestConfig::max_peers; t++)
+      {
+        RegionInstance::create_instance(inst_list1[t], m1, d, field_sizes,
+                                        (TestConfig::copy_aos ? 1 : 0),
+                                        ProfilingRequestSet()).wait();
+        assert(inst_list1[t].exists());
+      }
+      
+      // clear the instance first - this should also take care of faulting it in
+      {
+        for (size_t t = 0; t < TestConfig::max_peers; t++)
+        {
+          void *fill_value = 0;
+          std::vector<CopySrcDstField> srcs(TestConfig::copy_fields);
+          for (int i = 0; i < TestConfig::copy_fields; i++)
+            srcs[i].set_fill(fill_value);
+          std::vector<CopySrcDstField> dsts(TestConfig::copy_fields);
+          for (int i = 0; i < TestConfig::copy_fields; i++)
+            dsts[i].set_field(inst_list1[t], FID_BASE + i, sizeof(void *));
+
+          d.copy(srcs, dsts, ProfilingRequestSet()).wait();
+        }
+      }
+
+      for (std::vector<Memory>::const_iterator it2 = memories.begin();
+           it2 != memories.end();
+           ++it2)
+      {
+        Memory m2 = *it2;
+
+        std::vector<RegionInstance> inst_list2(TestConfig::max_peers);
+        for (size_t t = 0; t < TestConfig::max_peers; t++)
+        {
+          RegionInstance::create_instance(inst_list2[t], m2, d, field_sizes,
+                                          (TestConfig::copy_aos ? 1 : 0),
+                                          ProfilingRequestSet()).wait();
+          assert(inst_list2[t].exists());
+        }
+
+        // clear the instance first - this should also take care of faulting it in
+        {
+          for (size_t t = 0; t < TestConfig::max_peers; t++)
+          {
+            void *fill_value = 0;
+            std::vector<CopySrcDstField> srcs(TestConfig::copy_fields);
+            for (int i = 0; i < TestConfig::copy_fields; i++)
+              srcs[i].set_fill(fill_value);
+            std::vector<CopySrcDstField> dsts(TestConfig::copy_fields);
+            for (int i = 0; i < TestConfig::copy_fields; i++)
+              dsts[i].set_field(inst_list2[t], FID_BASE + i, sizeof(void *));
+            d.copy(srcs, dsts, ProfilingRequestSet()).wait();
+          }
+        }
+
+      //   long long total_full_copy_time = 0;
+      //   long long total_short_copy_time = 0;
+
+      //   std::vector<CopySrcDstField> srcs(TestConfig::copy_fields);
+      //   for (int i = 0; i < TestConfig::copy_fields; i++)
+      //     srcs[i].set_field(inst_list1[0], FID_BASE + i, sizeof(void *));
+      //   std::vector<CopySrcDstField> dsts(TestConfig::copy_fields);
+      //   for (int i = 0; i < TestConfig::copy_fields; i++)
+      //     dsts[i].set_field(inst_list2[0], FID_BASE + i, sizeof(void *));
+
+      //   for (int rep = 0; rep <= TestConfig::copy_reps; rep++)
+      //   {
+      //     // now perform two instance-to-instance copies
+
+      //     // copy #1 - full copy
+      //     long long full_copy_time = -1;
+      //     UserEvent full_copy_done = UserEvent::create_user_event();
+      //     {
+      //       CopyProfResult result;
+      //       result.nanoseconds = &full_copy_time;
+      //       result.done = full_copy_done;
+      //       ProfilingRequestSet prs;
+      //       prs.add_request(p, COPYPROF_TASK, &result, sizeof(CopyProfResult))
+      //           .add_measurement<ProfilingMeasurements::OperationTimeline>();
+      //       d.copy(srcs, dsts, prs).wait();
+      //     }
+
+      //     // copy #2 - single-element copy
+      //     long long short_copy_time = -1;
+      //     UserEvent short_copy_done = UserEvent::create_user_event();
+      //     {
+      //       CopyProfResult result;
+      //       result.nanoseconds = &short_copy_time;
+      //       result.done = short_copy_done;
+      //       ProfilingRequestSet prs;
+      //       prs.add_request(p, COPYPROF_TASK, &result, sizeof(CopyProfResult))
+      //           .add_measurement<ProfilingMeasurements::OperationTimeline>();
+      //       Rect<1>(0, 0).copy(srcs, dsts, prs).wait();
+      //     }
+
+      //     // wait for both results
+      //     full_copy_done.wait();
+      //     short_copy_done.wait();
+
+      //     if ((rep > 0) || (TestConfig::copy_reps == 0))
+      //     {
+      //       total_full_copy_time += full_copy_time;
+      //       total_short_copy_time += short_copy_time;
+      //     }
+      //   }
+
+      //   if (TestConfig::copy_reps > 1)
+      //   {
+      //     total_full_copy_time /= TestConfig::copy_reps;
+      //     total_short_copy_time /= TestConfig::copy_reps;
+      //   }
+
+      //   // latency is estimated as time to perfom single copy
+      //   double latency = total_short_copy_time;
+
+      //   // bandwidth is estimated based on extra time taken by full copy
+      //   double bw = (1.0 * elements * TestConfig::copy_fields * sizeof(void *) /
+      //                (total_full_copy_time - total_short_copy_time));
+        
+      //   log_app.info() << "copy " << m1 << " -> " << m2 << ": bw:" << bw << " lat:" << latency;
+
+      //   inst_list2[0].destroy();
+      // }
+
+      // inst_list1[0].destroy();
+
+        std::vector<long long> total_full_copy_time_list(TestConfig::max_peers);
+        std::vector<long long> total_short_copy_time_list(TestConfig::max_peers);
+        
+        std::vector<std::vector<CopySrcDstField> > srcs_list(TestConfig::max_peers, std::vector<CopySrcDstField> (TestConfig::copy_fields));
+        std::vector<std::vector<CopySrcDstField> > dsts_list(TestConfig::max_peers, std::vector<CopySrcDstField> (TestConfig::copy_fields));
+        for (size_t t = 0; t < TestConfig::max_peers; t++) 
+        {
+          for (int i = 0; i < TestConfig::copy_fields; i++)
+            srcs_list[t][i].set_field(inst_list1[t], FID_BASE + i, sizeof(void *));
+          for (int i = 0; i < TestConfig::copy_fields; i++)
+            dsts_list[t][i].set_field(inst_list2[t], FID_BASE + i, sizeof(void *));
+        }
+
+        for (int rep = 0; rep <= TestConfig::copy_reps; rep++)
+        {
+          // now perform two instance-to-instance copies
+          std::vector<long long> full_copy_time_list(TestConfig::max_peers);
+          std::vector<Event> copy_events0;
+          std::vector<Event> prof_events0;
+          for (size_t t = 0; t < TestConfig::max_peers; t++)
+          {
+            // copy #1 - full copy            
+            UserEvent full_copy_done = UserEvent::create_user_event();
+            {
+              CopyProfResult result;
+              result.nanoseconds = &full_copy_time_list[t];
+              result.done = full_copy_done;
+              ProfilingRequestSet prs;
+              prs.add_request(p, COPYPROF_TASK, &result, sizeof(CopyProfResult))
+                  .add_measurement<ProfilingMeasurements::OperationTimeline>();
+              Event e = d.copy(srcs_list[t], dsts_list[t], prs);
+              copy_events0.push_back(e);
+            }
+            prof_events0.push_back(full_copy_done);
+          }
+          Event merged_event0 = Event::merge_events(copy_events0);
+          merged_event0.wait();
+          
+          std::vector<long long> short_copy_time_list(TestConfig::max_peers);
+          std::vector<Event> copy_events1;
+          std::vector<Event> prof_events1;
+          for (size_t t = 0; t < TestConfig::max_peers; t++)
+          {
+            // copy #2 - single-element copy
+            UserEvent short_copy_done = UserEvent::create_user_event();
+            {
+              CopyProfResult result;
+              result.nanoseconds = &short_copy_time_list[t];
+              result.done = short_copy_done;
+              ProfilingRequestSet prs;
+              prs.add_request(p, COPYPROF_TASK, &result, sizeof(CopyProfResult))
+                  .add_measurement<ProfilingMeasurements::OperationTimeline>();
+              Event e = Rect<1>(0, 0).copy(srcs_list[t], dsts_list[t], prs);
+              copy_events1.push_back(e);
+            }
+            prof_events1.push_back(short_copy_done);
+          }
+          Event merged_event1 = Event::merge_events(copy_events1);
+          merged_event1.wait();
+
+          // wait for both results
+          Event::merge_events(prof_events0).wait();
+          Event::merge_events(prof_events1).wait();
+
+          if ((rep > 0) || (TestConfig::copy_reps == 0))
+          {
+            for (size_t t = 0; t < TestConfig::max_peers; t++)
+            {
+              total_full_copy_time_list[t] += full_copy_time_list[t];
+              // total_short_copy_time_list[t] += short_copy_time_list[t];
+            }
+          }
+        }
+        
+        for (size_t t = 0; t < TestConfig::max_peers; t++) {
+          if (TestConfig::copy_reps > 1)
+          {
+            total_full_copy_time_list[t] /= TestConfig::copy_reps;
+            total_short_copy_time_list[t] /= TestConfig::copy_reps;
+          }
+
+          // latency is estimated as time to perfom single copy
+          double latency = total_short_copy_time_list[t];
+
+          // bandwidth is estimated based on extra time taken by full copy
+          double bw = (1.0 * elements * TestConfig::copy_fields * sizeof(void *) /
+                     (total_full_copy_time_list[t] - total_short_copy_time_list[t]));
+
+          log_app.info() << t << " contention " << m1 << " -> " << m2 << ": bw:" << bw << " lat:" << latency;
+
+        }
+
+        for (size_t t = 0; t < TestConfig::max_peers; t++)
+        {
+          inst_list2[t].destroy();
+        }
+      }
+
+      for (size_t t = 0; t < TestConfig::max_peers; t++)
+      {
+        inst_list1[t].destroy();
+      }
+    }
+  }
+
   // HACK: there's a shutdown race condition related to instance destruction
   usleep(100000);
 }
 
 int main(int argc, char **argv)
 {
+  // sleep(20);
   Runtime rt;
 
   rt.init(&argc, &argv);
@@ -492,7 +738,10 @@ int main(int argc, char **argv)
     .add_option_int("-sparse", TestConfig::sparse_chunk)
     .add_option_int("-gap", TestConfig::sparse_gap)
     .add_option_int("-aos", TestConfig::copy_aos)
-    .add_option_int("-slowmem", TestConfig::slow_mems);
+    .add_option_int("-slowmem", TestConfig::slow_mems)
+    .add_option_int("-contention", TestConfig::do_contention)
+    .add_option_int("-maxpeers", TestConfig::max_peers);
+
   bool ok = cp.parse_command_line(argc, const_cast<const char **>(argv));
   assert(ok);
 
