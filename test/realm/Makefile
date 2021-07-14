@@ -60,6 +60,7 @@ TESTS += alltoall
 TESTS += simple_reduce
 TESTS += fpga_simple
 TESTS += fpga_compression
+TESTS += fpga_internode
 
 # can set arguments to be passed to a test when running
 TESTARGS_ctxswitch := -ll:io 1 -t 20 -i 10000

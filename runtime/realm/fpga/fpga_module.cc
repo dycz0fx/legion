@@ -4,6 +4,21 @@
 #include "realm/cmdline.h"
 #include "realm/utils.h"
 
+#include <sys/stat.h>
+#include <sys/mman.h>
+
+#define CMD_SIZE 4096
+
+#define ARG_DEFLATE_INPUT_OFFSET 0x10
+#define ARG_DEFLATE_OUTPUT_OFFSET 0x1c
+#define ARG_DEFLATE_SIZE_OFFSET 0x28
+#define ARG_INFLATE_INPUT_OFFSET 0x10
+#define ARG_INFLATE_OUTPUT_OFFSET 0x1c
+
+#define DEFLATE_XCLBIN "/home/xi/Programs/lz77/deflate.xclbin"
+#define INFLATE_XCLBIN "/home/xi/Programs/lz77/inflate.xclbin"
+#define DEFAULT_COMP_UNITS 4
+
 namespace Realm
 {
   namespace FPGA
@@ -102,21 +117,43 @@ namespace Realm
            it != local_mems.end();
            it++)
       {
-        if ((*it)->kind != MemoryImpl::MKIND_SYSMEM)
+        if ((*it)->lowlevel_kind == Memory::SYSTEM_MEM)
         {
-          continue;
+          this->local_sysmem = *it;
+          log_fpga.info() << "local_sysmem " << std::hex << (*it)->me.id << std::dec << " kind: " << (*it)->kind << " low-level kind: " << (*it)->lowlevel_kind;
+          break;
         }
-        this->local_sysmem = *it;
+      }
+
+      const std::vector<IBMemory *> &local_ib_mems = runtime->nodes[Network::my_node_id].ib_memories;
+      for (std::vector<Realm::IBMemory *>::const_iterator it = local_ib_mems.begin();
+           it != local_ib_mems.end();
+           it++)
+      {
+        if ((*it)->lowlevel_kind == Memory::REGDMA_MEM)
+        {
+          this->local_ibmem = *it;
+          log_fpga.info() << "local_ibmem " << std::hex << (*it)->me.id << std::dec << " kind: " << (*it)->kind << " low-level kind: " << (*it)->lowlevel_kind;
+          break;
+        }
       }
 
       runtime->add_dma_channel(new FPGAfillChannel(this, &runtime->bgwork));
       runtime->add_dma_channel(new FPGAChannel(this, XFER_FPGA_IN_DEV, &runtime->bgwork));
       runtime->add_dma_channel(new FPGAChannel(this, XFER_FPGA_TO_DEV, &runtime->bgwork));
       runtime->add_dma_channel(new FPGAChannel(this, XFER_FPGA_FROM_DEV, &runtime->bgwork));
+      runtime->add_dma_channel(new FPGAChannel(this, XFER_FPGA_TO_DEV_COMP, &runtime->bgwork));
+      runtime->add_dma_channel(new FPGAChannel(this, XFER_FPGA_FROM_DEV_COMP, &runtime->bgwork));
 
       Machine::MemoryMemoryAffinity mma;
       mma.m1 = fpga_mem->me;
       mma.m2 = local_sysmem->me;
+      mma.bandwidth = 20; // TODO
+      mma.latency = 200;
+      runtime->add_mem_mem_affinity(mma);
+
+      mma.m1 = fpga_mem->me;
+      mma.m2 = local_ibmem->me;
       mma.bandwidth = 20; // TODO
       mma.latency = 200;
       runtime->add_mem_mem_affinity(mma);
@@ -195,7 +232,7 @@ namespace Realm
 
     void FPGADevice::copy_within_fpga(off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *notification)
     {
-      log_fpga.info() << "copy_within_fpga: dst_offset = " << dst_offset << " src_offset = " << src_offset
+      log_fpga.info() << "copy_within_fpga(not implemented!): dst_offset = " << dst_offset << " src_offset = " << src_offset
                       << " bytes = " << bytes << "\n";
 
       notification->request_completed();
@@ -203,11 +240,218 @@ namespace Realm
 
     void FPGADevice::copy_to_peer(FPGADevice *dst, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *notification)
     {
-      log_fpga.info() << "copy_to_peer: dst = " << dst << " dst_offset = " << dst_offset
+      log_fpga.info() << "copy_to_peer(not implemented!): dst = " << dst << " dst_offset = " << dst_offset
                       << " bytes = " << bytes << " notification = " << notification << "\n";
       notification->request_completed();
     }
+    
+    // decompress data after moving data from ib memory to fpga device memory
+    void FPGADevice::copy_to_fpga_comp(off_t dst_offset, const void *src, size_t bytes, FPGACompletionNotification *notification)
+    {
+      size_t i;
+      size_t dst = reinterpret_cast<size_t>((uint8_t *)(fpga_mem->base_ptr_sys) + dst_offset);
+      int *temp = (int *)dst;
+      log_fpga.info() << "copy_to_fpga_comp: src = " << src << " dst_offset = " << dst_offset
+                      << " bytes = " << bytes << " dst = " << temp << "\n";
+      
+      // create a temp BO to store compressed data
+      xclBufferHandle bo_temp;
+      bo_temp = xclAllocBO(this->dev_handle, bytes, 0, 1);
+      char *bo_temp_host;
+      bo_temp_host = (char *)xclMapBO(this->dev_handle, bo_temp, true);
+      uint64_t bo_temp_dev;
+      struct xclBOProperties bo_prop;
+      xclGetBOProperties(this->dev_handle, bo_temp, &bo_prop);
+      bo_temp_dev = bo_prop.paddr;
 
+      fpga_memcpy_2d(reinterpret_cast<uintptr_t>(bo_temp_host), 0,
+                     reinterpret_cast<uintptr_t>(src), 0,
+                     bytes, 1);
+      xclSyncBO(this->dev_handle, bo_temp, XCL_BO_SYNC_BO_TO_DEVICE, bytes, 0);
+
+      printf("copy_to_fpga_comp before decompression: ");
+      for (i = 0; i < bytes; i++)
+      {
+        if (bo_temp_host[i] == '\0') {
+          printf("_");
+        }
+        else {
+          printf("%c", bo_temp_host[i]);
+        }
+      }
+      printf("\n");
+
+      //load xclbin
+      int fd = open(INFLATE_XCLBIN, O_RDONLY);
+      struct stat st;
+      fstat(fd, &st);
+      size_t xclbin_size = st.st_size;
+      struct axlf *xclbin = (struct axlf *)mmap(NULL, xclbin_size, PROT_READ, MAP_PRIVATE, fd, 0);
+      uuid_t xclbin_uuid;
+      memcpy(xclbin_uuid, xclbin->m_header.uuid, sizeof(uuid_t));
+      xclLoadXclBin(this->dev_handle, (const struct axlf *)xclbin);
+      munmap(xclbin, xclbin_size);
+      close(fd);
+
+      size_t num_compute_units = DEFAULT_COMP_UNITS;
+      for (i = 0; i < num_compute_units; i++)
+      {
+        xclOpenContext(this->dev_handle, xclbin_uuid, (unsigned int)i, true);
+      }
+
+      uint64_t p_base_dev = (uint64_t)this->fpga_mem->base_ptr_dev;
+      uint64_t p_inflate_in = bo_temp_dev;
+      uint64_t p_inflate_out = p_base_dev + dst_offset;
+      log_fpga.print("p_inflate_in = %zu p_inflate_out = %zu\n", p_inflate_in, p_inflate_out);
+
+      xclBufferHandle bo_cmd = xclAllocBO(this->dev_handle, (size_t)CMD_SIZE, 0, XCL_BO_FLAGS_EXECBUF);
+      struct ert_start_kernel_cmd *start_cmd = (struct ert_start_kernel_cmd *)xclMapBO(this->dev_handle, bo_cmd, true);
+      memset(start_cmd, 0, CMD_SIZE);
+      start_cmd->state = ERT_CMD_STATE_NEW;
+      start_cmd->opcode = ERT_START_CU;
+      start_cmd->stat_enabled = 1;
+      start_cmd->count = ARG_INFLATE_OUTPUT_OFFSET/4 + 3;
+      start_cmd->cu_mask = (1 << num_compute_units )-1;  /* CU 0, 1, 2 */
+      start_cmd->data[ARG_INFLATE_INPUT_OFFSET/4] = p_inflate_in; 
+      start_cmd->data[ARG_INFLATE_INPUT_OFFSET/4 + 1] = (p_inflate_in >> 32) & 0xFFFFFFFF;
+      start_cmd->data[ARG_INFLATE_OUTPUT_OFFSET/4] = p_inflate_out; 
+      start_cmd->data[ARG_INFLATE_OUTPUT_OFFSET/4 + 1] = (p_inflate_out >> 32) & 0xFFFFFFFF;
+
+      xclExecBuf(this->dev_handle, bo_cmd);
+      struct ert_packet *cmd_packet = (struct ert_packet *)start_cmd;
+      while (cmd_packet->state != ERT_CMD_STATE_COMPLETED)
+      {
+        xclExecWait(this->dev_handle, 1000);
+      }
+
+      xclUnmapBO(this->dev_handle, bo_cmd, start_cmd);
+      xclFreeBO(this->dev_handle, bo_cmd);
+      for (i = 0; i < num_compute_units; i++)
+      {
+        xclCloseContext(this->dev_handle, xclbin_uuid, (unsigned int)i);
+      }
+      
+      // copy data from fpga device memory for testing
+      xclSyncBO(this->dev_handle, this->bo_handle, XCL_BO_SYNC_BO_FROM_DEVICE, bytes, dst_offset);
+
+      // printf("copy_to_fpga_comp: ");
+      // for (i = 0; i < 6000; i++)
+      // {
+      //   if (((char *)fpga_mem->base_ptr_sys)[i] == '\0') {
+      //     printf("_");
+      //   }
+      //   else {
+      //     printf("%c", ((char *)fpga_mem->base_ptr_sys)[i]);
+      //   }
+      // }
+      // printf("\n");
+      notification->request_completed();
+    }
+    
+    // compress data before moving data from fpga device memory to ib memory
+    void FPGADevice::copy_from_fpga_comp(void *dst, off_t src_offset, size_t bytes, FPGACompletionNotification *notification)
+    {
+      size_t i;
+      size_t src = reinterpret_cast<size_t>((uint8_t *)(fpga_mem->base_ptr_sys) + src_offset);
+      int *temp = (int *)src;
+      log_fpga.info() << "copy_from_fpga_comp: dst = " << dst << " src_offset = " << src_offset
+                      << " bytes = " << bytes << " src = " << temp << "\n";
+
+      // create a temp BO to store compressed data
+      xclBufferHandle bo_temp;
+      bo_temp = xclAllocBO(this->dev_handle, bytes, 0, 1);
+      char *bo_temp_host;
+      bo_temp_host = (char *)xclMapBO(this->dev_handle, bo_temp, true);
+      uint64_t bo_temp_dev;
+      struct xclBOProperties bo_prop;
+      xclGetBOProperties(this->dev_handle, bo_temp, &bo_prop);
+      bo_temp_dev = bo_prop.paddr;
+
+      //load xclbin
+      int fd = open(DEFLATE_XCLBIN, O_RDONLY);
+      struct stat st;
+      fstat(fd, &st);
+      size_t xclbin_size = st.st_size;
+      struct axlf *xclbin = (struct axlf *)mmap(NULL, xclbin_size, PROT_READ, MAP_PRIVATE, fd, 0);
+      uuid_t xclbin_uuid;
+      memcpy(xclbin_uuid, xclbin->m_header.uuid, sizeof(uuid_t));
+      xclLoadXclBin(this->dev_handle, (const struct axlf *)xclbin);
+      munmap(xclbin, xclbin_size);
+      close(fd);
+
+      size_t num_compute_units = DEFAULT_COMP_UNITS;
+      for (i = 0; i < num_compute_units; i++)
+      {
+        xclOpenContext(this->dev_handle, xclbin_uuid, (unsigned int)i, true);
+      }
+
+      uint64_t p_base_dev = (uint64_t)this->fpga_mem->base_ptr_dev;
+      uint64_t p_deflate_in = p_base_dev + src_offset;
+      uint64_t p_deflate_out = bo_temp_dev;
+      log_fpga.print("p_deflate_in = %lu p_deflate_out = %lu\n", p_deflate_in, p_deflate_out);
+
+      xclBufferHandle bo_cmd = xclAllocBO(this->dev_handle, (size_t)CMD_SIZE, 0, XCL_BO_FLAGS_EXECBUF);
+      struct ert_start_kernel_cmd *start_cmd = (struct ert_start_kernel_cmd *)xclMapBO(this->dev_handle, bo_cmd, true);
+      memset(start_cmd, 0, CMD_SIZE);
+      start_cmd->state = ERT_CMD_STATE_NEW;
+      start_cmd->opcode = ERT_START_CU;
+      start_cmd->stat_enabled = 1;
+      start_cmd->count = ARG_DEFLATE_SIZE_OFFSET/4 + 3;
+      start_cmd->cu_mask = (1 << num_compute_units )-1;  /* CU 0, 1, 2 */
+      start_cmd->data[ARG_DEFLATE_INPUT_OFFSET/4] = p_deflate_in; 
+      start_cmd->data[ARG_DEFLATE_INPUT_OFFSET/4 + 1] = (p_deflate_in >> 32) & 0xFFFFFFFF;
+      start_cmd->data[ARG_DEFLATE_OUTPUT_OFFSET/4] = p_deflate_out; 
+      start_cmd->data[ARG_DEFLATE_OUTPUT_OFFSET/4 + 1] = (p_deflate_out >> 32) & 0xFFFFFFFF;
+      start_cmd->data[ARG_DEFLATE_SIZE_OFFSET/4] = bytes;
+      start_cmd->data[ARG_DEFLATE_SIZE_OFFSET/4 + 1] = (bytes >> 32) & 0xFFFFFFFF;
+
+      xclExecBuf(this->dev_handle, bo_cmd);
+      struct ert_packet *cmd_packet = (struct ert_packet *)start_cmd;
+      while (cmd_packet->state != ERT_CMD_STATE_COMPLETED)
+      {
+        xclExecWait(this->dev_handle, 1000);
+      }
+
+      xclUnmapBO(this->dev_handle, bo_cmd, start_cmd);
+      xclFreeBO(this->dev_handle, bo_cmd);
+      for (i = 0; i < num_compute_units; i++)
+      {
+        xclCloseContext(this->dev_handle, xclbin_uuid, (unsigned int)i);
+      }
+
+      xclSyncBO(this->dev_handle, bo_temp, XCL_BO_SYNC_BO_FROM_DEVICE, bytes, 0);
+      size_t new_bytes = 0;
+      while (bo_temp_host[new_bytes] != '\0')
+      {
+        if (bo_temp_host[new_bytes] == '@')
+        {
+          new_bytes += 4;
+        }
+        else {
+          new_bytes++;
+        }
+      }
+      new_bytes++;
+      printf("new_bytes = %lu\n", new_bytes);
+
+      fpga_memcpy_2d(reinterpret_cast<uintptr_t>(dst), 0,
+                     reinterpret_cast<uintptr_t>(bo_temp_host), 0,
+                     new_bytes, 1);
+      
+      // printf("copy_from_fpga_comp: ");
+      // for (int i = 0; i < 6000; i++)
+      // {
+      //   if (((char *)fpga_mem->base_ptr_sys)[i] == '\0') {
+      //     printf("_");
+      //   }
+      //   else {
+      //     printf("%c", ((char *)fpga_mem->base_ptr_sys)[i]);
+      //   }
+      // }
+      // printf("\n");
+      notification->request_completed();
+    }
+    
     FPGAModule::FPGAModule() : Module("fpga"), cfg_num_fpgas(0), cfg_fpga_mem_size(0)
     {
     }
@@ -601,6 +845,18 @@ namespace Realm
           reqs[i]->dst_fpga = dst_fpga;
           break;
         }
+        case XFER_FPGA_TO_DEV_COMP:
+        {
+          reqs[i]->src_base = input_ports[reqs[i]->src_port_idx].mem->get_direct_ptr(reqs[i]->src_off, reqs[i]->nbytes);
+          assert(reqs[i]->src_base != 0);
+          break;
+        }
+        case XFER_FPGA_FROM_DEV_COMP:
+        {
+          reqs[i]->dst_base = output_ports[reqs[i]->dst_port_idx].mem->get_direct_ptr(reqs[i]->dst_off, reqs[i]->nbytes);
+          assert(reqs[i]->dst_base != 0);
+          break;
+        }
         default:
           assert(0);
         }
@@ -648,6 +904,7 @@ namespace Realm
 
       Memory temp_fpga_mem = src_fpga->fpga_mem->me;
       Memory temp_sys_mem = src_fpga->local_sysmem->me;
+      Memory temp_rdma_mem = src_fpga->local_ibmem->me;
 
       switch (_kind)
       {
@@ -656,6 +913,7 @@ namespace Realm
         unsigned bw = 0; // TODO
         unsigned latency = 0;
         add_path(temp_sys_mem, temp_fpga_mem, bw, latency, false, false, XFER_FPGA_TO_DEV);
+        add_path(temp_rdma_mem, temp_fpga_mem, bw, latency, false, false, XFER_FPGA_TO_DEV);
         break;
       }
 
@@ -664,6 +922,7 @@ namespace Realm
         unsigned bw = 0; // TODO
         unsigned latency = 0;
         add_path(temp_fpga_mem, temp_sys_mem, bw, latency, false, false, XFER_FPGA_FROM_DEV);
+        add_path(temp_fpga_mem, temp_rdma_mem, bw, latency, false, false, XFER_FPGA_FROM_DEV);
         break;
       }
 
@@ -680,6 +939,24 @@ namespace Realm
       {
         // just do paths to peers - they'll do the other side
         assert(0 && "not implemented");
+        break;
+      }
+      
+      case XFER_FPGA_TO_DEV_COMP:
+      {
+        unsigned bw = 0; // TODO
+        unsigned latency = 0;
+        add_path(temp_sys_mem, temp_fpga_mem, bw, latency, false, false, XFER_FPGA_TO_DEV_COMP);
+        add_path(temp_rdma_mem, temp_fpga_mem, bw, latency, false, false, XFER_FPGA_TO_DEV_COMP);
+        break;
+      }
+
+      case XFER_FPGA_FROM_DEV_COMP:
+      {
+        unsigned bw = 0; // TODO
+        unsigned latency = 0;
+        add_path(temp_fpga_mem, temp_sys_mem, bw, latency, false, false, XFER_FPGA_FROM_DEV_COMP);
+        add_path(temp_fpga_mem, temp_rdma_mem, bw, latency, false, false, XFER_FPGA_FROM_DEV_COMP);
         break;
       }
 
@@ -704,8 +981,8 @@ namespace Realm
       assert(redop_info.id == 0);
       assert(fill_size == 0);
       return new FPGAXferDes(dma_op, this, launch_node, guid,
-                             inputs_info, outputs_info,
-                             priority);
+                                          inputs_info, outputs_info,
+                                          priority);
     }
 
     long FPGAChannel::submit(Request **requests, long nr)
@@ -747,6 +1024,14 @@ namespace Realm
             src_fpga->copy_to_peer(req->dst_fpga, req->dst_off,
                                    req->src_off, req->nbytes, &req->event);
             break;
+          case XFER_FPGA_TO_DEV_COMP:
+            src_fpga->copy_to_fpga_comp(req->dst_off, req->src_base,
+                                        req->nbytes, &req->event);
+            break;
+          case XFER_FPGA_FROM_DEV_COMP:
+            src_fpga->copy_from_fpga_comp(req->dst_base, req->src_off,
+                                          req->nbytes, &req->event);
+            break;
           default:
             assert(0);
           }
@@ -769,6 +1054,12 @@ namespace Realm
           case XFER_FPGA_PEER_DEV:
             assert(0 && "not implemented");
             break;
+          case XFER_FPGA_TO_DEV_COMP:
+            assert(0 && "not implemented");
+            break;
+          case XFER_FPGA_FROM_DEV_COMP:
+            assert(0 && "not implemented");
+            break;
           default:
             assert(0);
           }
@@ -789,6 +1080,12 @@ namespace Realm
             assert(0 && "not implemented");
             break;
           case XFER_FPGA_PEER_DEV:
+            assert(0 && "not implemented");
+            break;
+          case XFER_FPGA_TO_DEV_COMP:
+            assert(0 && "not implemented");
+            break;
+          case XFER_FPGA_FROM_DEV_COMP:
             assert(0 && "not implemented");
             break;
           default:

@@ -75,6 +75,8 @@ namespace Realm {
       XFER_FPGA_FROM_DEV,
       XFER_FPGA_IN_DEV,
       XFER_FPGA_PEER_DEV,
+      XFER_FPGA_TO_DEV_COMP,
+      XFER_FPGA_FROM_DEV_COMP,
     };
 
     class Request {

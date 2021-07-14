@@ -49,8 +49,11 @@ namespace Realm
       void copy_from_fpga(void *dst, off_t src_offset, size_t bytes, FPGACompletionNotification *notification);
       void copy_within_fpga(off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *notification);
       void copy_to_peer(FPGADevice *dst, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *notification);
+      void copy_to_fpga_comp(off_t dst_offset, const void *src, size_t bytes, FPGACompletionNotification *notification);
+      void copy_from_fpga_comp(void *dst, off_t src_offset, size_t bytes, FPGACompletionNotification *notification);
       FPGADeviceMemory *fpga_mem;
       MemoryImpl *local_sysmem;
+      IBMemory *local_ibmem;
     };
 
     class FPGAProcessor : public LocalTaskProcessor
@@ -99,6 +102,7 @@ namespace Realm
       void *dst_base;
       FPGADevice *dst_fpga;
       FPGACompletionEvent event;
+      size_t new_nbytes = 0;   //new num of bytes after compression
     };
 
     class FPGAChannel;
