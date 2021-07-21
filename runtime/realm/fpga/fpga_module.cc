@@ -715,33 +715,33 @@ namespace Realm
                              NodeID _launch_node, XferDesID _guid,
                              const std::vector<XferDesPortInfo> &inputs_info,
                              const std::vector<XferDesPortInfo> &outputs_info,
-                             int _priority)
+                             int _priority, XferDesKind kind)
         : XferDes(_dma_op, _channel, _launch_node, _guid,
                   inputs_info, outputs_info,
                   _priority, 0, 0)
     {
-      if ((inputs_info.size() >= 1) &&
-          (input_ports[0].mem->kind == MemoryImpl::MKIND_FPGA))
-      {
-        // all input ports should agree on which fpga they target
-        src_fpga = ((FPGADeviceMemory *)(input_ports[0].mem))->device;
-        for (size_t i = 1; i < input_ports.size(); i++)
-        {
-          // exception: control and indirect ports should be readable from cpu
-          if ((int(i) == input_control.control_port_idx) ||
-              (int(i) == output_control.control_port_idx) ||
-              input_ports[i].is_indirect_port)
-          {
-            assert((input_ports[i].mem->kind == MemoryImpl::MKIND_SYSMEM));
-            continue;
-          }
-          assert(input_ports[i].mem == input_ports[0].mem);
-        }
-      }
-      else
-      {
-        src_fpga = 0;
-      }
+      // if ((inputs_info.size() >= 1) &&
+      //     (input_ports[0].mem->kind == MemoryImpl::MKIND_FPGA))
+      // {
+      //   // all input ports should agree on which fpga they target
+      //   src_fpga = ((FPGADeviceMemory *)(input_ports[0].mem))->device;
+      //   for (size_t i = 1; i < input_ports.size(); i++)
+      //   {
+      //     // exception: control and indirect ports should be readable from cpu
+      //     if ((int(i) == input_control.control_port_idx) ||
+      //         (int(i) == output_control.control_port_idx) ||
+      //         input_ports[i].is_indirect_port)
+      //     {
+      //       assert((input_ports[i].mem->kind == MemoryImpl::MKIND_SYSMEM));
+      //       continue;
+      //     }
+      //     assert(input_ports[i].mem == input_ports[0].mem);
+      //   }
+      // }
+      // else
+      // {
+      //   src_fpga = 0;
+      // }
 
       if ((outputs_info.size() >= 1) &&
           (output_ports[0].mem->kind == MemoryImpl::MKIND_FPGA))
@@ -766,44 +766,73 @@ namespace Realm
         if (output_ports[i].peer_guid != XFERDES_NO_GUID)
           multihop_copy = true;
 
-      if (src_fpga != 0)
-      {
-        if (dst_fpga != 0)
-        {
-          if (src_fpga == dst_fpga)
-          {
-            kind = XFER_FPGA_IN_DEV;
-            // ignore max_req_size value passed in - it's probably too small
-            max_req_size = 1 << 30;
-          }
-          else
-          {
-            kind = XFER_FPGA_PEER_DEV;
-            // ignore max_req_size value passed in - it's probably too small
-            max_req_size = 256 << 20;
-          }
-        }
-        else
-        {
-          kind = XFER_FPGA_FROM_DEV;
-          if (multihop_copy)
-            max_req_size = 4 << 20;
-        }
-      }
-      else
-      {
-        if (dst_fpga != 0)
-        {
-          kind = XFER_FPGA_TO_DEV;
-          if (multihop_copy)
-            max_req_size = 4 << 20;
-        }
-        else
-        {
-          assert(0);
-        }
-      }
+      // if (src_fpga != 0)
+      // {
+      //   if (dst_fpga != 0)
+      //   {
+      //     if (src_fpga == dst_fpga)
+      //     {
+      //       kind = XFER_FPGA_IN_DEV;
+      //       // ignore max_req_size value passed in - it's probably too small
+      //       max_req_size = 1 << 30;
+      //     }
+      //     else
+      //     {
+      //       kind = XFER_FPGA_PEER_DEV;
+      //       // ignore max_req_size value passed in - it's probably too small
+      //       max_req_size = 256 << 20;
+      //     }
+      //   }
+      //   else
+      //   {
+      //     kind = XFER_FPGA_FROM_DEV;
+      //     if (multihop_copy)
+      //       max_req_size = 4 << 20;
+      //   }
+      // }
+      // else
+      // {
+      //   if (dst_fpga != 0)
+      //   {
+      //     kind = XFER_FPGA_TO_DEV;
+      //     if (multihop_copy)
+      //       max_req_size = 4 << 20;
+      //   }
+      //   else
+      //   {
+      //     assert(0);
+      //   }
+      // }
 
+      log_fpga.info() << "create FPGAXferDes " << kind;
+      this->kind = kind;
+      switch (kind)
+      {
+      case XFER_FPGA_TO_DEV:
+        if (multihop_copy)
+          max_req_size = 4 << 20;
+        break;
+      case XFER_FPGA_FROM_DEV:
+        if (multihop_copy)
+          max_req_size = 4 << 20;
+        break;
+      case XFER_FPGA_IN_DEV:
+        max_req_size = 1 << 30;
+        break;
+      case XFER_FPGA_PEER_DEV:
+        max_req_size = 256 << 20;
+        break;
+      case XFER_FPGA_TO_DEV_COMP:
+        if (multihop_copy)
+          max_req_size = 4 << 20;
+        break;
+      case XFER_FPGA_FROM_DEV_COMP:
+        if (multihop_copy)
+          max_req_size = 4 << 20;
+        break;
+      default:
+        break;
+      }
       const int max_nr = 10; // TODO:FIXME
       for (int i = 0; i < max_nr; i++)
       {
@@ -981,8 +1010,8 @@ namespace Realm
       assert(redop_info.id == 0);
       assert(fill_size == 0);
       return new FPGAXferDes(dma_op, this, launch_node, guid,
-                                          inputs_info, outputs_info,
-                                          priority);
+                             inputs_info, outputs_info,
+                             priority, kind);
     }
 
     long FPGAChannel::submit(Request **requests, long nr)

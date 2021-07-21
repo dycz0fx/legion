@@ -114,7 +114,7 @@ namespace Realm
                   NodeID _launch_node, XferDesID _guid,
                   const std::vector<XferDesPortInfo> &inputs_info,
                   const std::vector<XferDesPortInfo> &outputs_info,
-                  int _priority);
+                  int _priority, XferDesKind kind);
 
       ~FPGAXferDes()
       {
@@ -134,7 +134,8 @@ namespace Realm
       bool progress_xd(FPGAChannel *channel, TimeLimit work_until);
 
     private:
-      FPGADevice *dst_fpga, *src_fpga;
+    //   FPGADevice *src_fpga;
+      FPGADevice *dst_fpga;
     };
 
     class FPGAChannel : public SingleXDQChannel<FPGAChannel, FPGAXferDes>
