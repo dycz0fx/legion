@@ -32,6 +32,16 @@ namespace Realm
       virtual void request_completed(void) = 0;
     };
 
+    class FPGARequest;
+
+    class FPGACompletionEvent : public FPGACompletionNotification
+    {
+    public:
+      void request_completed(void);
+
+      FPGARequest *req;
+    };
+
     class FPGADeviceMemory;
 
     class FPGADevice
@@ -45,12 +55,12 @@ namespace Realm
       ~FPGADevice();
       void create_fpga_mem(RuntimeImpl *runtime, size_t size);
       void create_dma_channels(RuntimeImpl *runtime);
-      void copy_to_fpga(off_t dst_offset, const void *src, size_t bytes, FPGACompletionNotification *notification);
-      void copy_from_fpga(void *dst, off_t src_offset, size_t bytes, FPGACompletionNotification *notification);
-      void copy_within_fpga(off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *notification);
-      void copy_to_peer(FPGADevice *dst, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *notification);
-      void copy_to_fpga_comp(off_t dst_offset, const void *src, size_t bytes, FPGACompletionNotification *notification);
-      void copy_from_fpga_comp(void *dst, off_t src_offset, size_t bytes, FPGACompletionNotification *notification);
+      void copy_to_fpga(off_t dst_offset, const void *src, size_t bytes, FPGACompletionEvent *event);
+      void copy_from_fpga(void *dst, off_t src_offset, size_t bytes, FPGACompletionEvent *event);
+      void copy_within_fpga(off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionEvent *event);
+      void copy_to_peer(FPGADevice *dst, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionEvent *event);
+      void copy_to_fpga_comp(off_t dst_offset, const void *src, size_t bytes, FPGACompletionEvent *event);
+      void copy_from_fpga_comp(void *dst, off_t src_offset, size_t bytes, FPGACompletionEvent *event);
       FPGADeviceMemory *fpga_mem;
       MemoryImpl *local_sysmem;
       IBMemory *local_ibmem;
@@ -85,16 +95,6 @@ namespace Realm
       void *base_ptr_dev;
     };
 
-    class FPGARequest;
-
-    class FPGACompletionEvent : public FPGACompletionNotification
-    {
-    public:
-      void request_completed(void);
-
-      FPGARequest *req;
-    };
-
     class FPGARequest : public Request
     {
     public:
@@ -126,6 +126,7 @@ namespace Realm
         }
       }
 
+      long default_get_requests_tentative(Request **requests, long nr, unsigned flags);
       long get_requests(Request **requests, long nr);
       void notify_request_read_done(Request *req);
       void notify_request_write_done(Request *req);
