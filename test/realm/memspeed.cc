@@ -682,7 +682,7 @@ void top_level_task(const void *args, size_t arglen,
             for (size_t t = 0; t < TestConfig::max_peers; t++)
             {
               total_full_copy_time_list[t] += full_copy_time_list[t];
-              // total_short_copy_time_list[t] += short_copy_time_list[t];
+              total_short_copy_time_list[t] += short_copy_time_list[t];
             }
           }
         }

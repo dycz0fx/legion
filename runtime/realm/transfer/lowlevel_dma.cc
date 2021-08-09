@@ -874,14 +874,14 @@ namespace Realm {
 	  }
 	}
       }
-    if (src_mem.exists() and dst_mem.exists()) {
-      std::cout << "src: " << src_mem << " " << src_mem.kind() << std::endl;
-      std::cout << "dst: " << dst_mem << " " << dst_mem.kind() << std::endl;
-      for (size_t i = 0; i < info.path.size(); i++) {
-        std::cout << info.path[i] << " " << info.path[i].kind() << std::endl;
-      }
-      std::cout << std::endl;
-    }
+    // if (src_mem.exists() and dst_mem.exists()) {
+    //   std::cout << "src: " << src_mem << " " << src_mem.kind() << std::endl;
+    //   std::cout << "dst: " << dst_mem << " " << dst_mem.kind() << std::endl;
+    //   for (size_t i = 0; i < info.path.size(); i++) {
+    //     std::cout << info.path[i] << " " << info.path[i].kind() << std::endl;
+    //   }
+    //   std::cout << std::endl;
+    // }
       return true;
     }
 
