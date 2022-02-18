@@ -45,22 +45,22 @@ CXX ?= g++
 NO_BUILD_RULES=1
 include $(LG_RT_DIR)/runtime.mk
 
-TESTS := serializing test_profiling ctxswitch barrier_reduce taskreg memspeed idcheck inst_reuse transpose
-TESTS += proc_group
-TESTS += deppart
-TESTS += scatter
-TESTS += compqueue
-TESTS += event_subscribe
-TESTS += deferred_allocs
-TESTS += test_nodeset
-TESTS += subgraphs
-TESTS += large_tls
-TESTS += coverings
-TESTS += alltoall
-TESTS += simple_reduce
-TESTS += fpga_simple
-TESTS += fpga_compression
-TESTS += fpga_internode
+# TESTS := serializing test_profiling ctxswitch barrier_reduce taskreg memspeed idcheck inst_reuse transpose
+# TESTS += proc_group
+# TESTS += deppart
+# TESTS += scatter
+# TESTS += compqueue
+# TESTS += event_subscribe
+# TESTS += deferred_allocs
+# TESTS += test_nodeset
+# TESTS += subgraphs
+# TESTS += large_tls
+# TESTS += coverings
+# TESTS += alltoall
+# TESTS += simple_reduce
+# TESTS += fpga_compression
+# TESTS += fpga_internode
+TESTS := fpga_vadd
 
 # can set arguments to be passed to a test when running
 TESTARGS_ctxswitch := -ll:io 1 -t 20 -i 10000
