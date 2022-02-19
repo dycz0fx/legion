@@ -15,25 +15,21 @@ namespace Realm
 {
     namespace FPGA
     {
-        enum FPGADeviceMemcpyKind
-        {
-            FPGA_MEMCPY_HOST_TO_DEVICE,
-            FPGA_MEMCPY_DEVICE_TO_HOST,
-            FPGA_MEMCPY_DEVICE_TO_DEVICE,
-            FPGA_MEMCPY_PEER_TO_PEER,
-        };
+        class FPGAQueue;
+        class FPGADevice;
+        class FPGADeviceMemcpy;
+        class FPGARequest;
 
-        class FPGADeviceCompletionNotification
+        class FPGACompletionNotification
         {
         public:
-            virtual ~FPGADeviceCompletionNotification(void) {}
+            virtual ~FPGACompletionNotification(void) {}
 
             virtual void request_completed(void) = 0;
         };
 
-        class FPGARequest;
 
-        class FPGACompletionEvent : public FPGADeviceCompletionNotification
+        class FPGACompletionEvent : public FPGACompletionNotification
         {
         public:
             void request_completed(void);
@@ -41,8 +37,6 @@ namespace Realm
             FPGARequest *req;
         };
 
-        class FPGAQueue;
-        class FPGADevice;
         // a FPGAWorker is responsible for making progress
         // on one or more Command Queues -
         // this may be done directly by an FPGAProcessor
@@ -93,15 +87,15 @@ namespace Realm
         public:
             FPGAQueue(FPGADevice *fpga_device, FPGAWorker *fpga_worker, cl::CommandQueue &command_queue);
             ~FPGAQueue(void);
-            cl::Context get_context(void) const;
+            cl::CommandQueue &get_command_queue() const;
             void add_fence(FPGAWorkFence *fence);
+            void add_notification(FPGACompletionNotification *notification);
             bool reap_events(TimeLimit work_until);
-
-            // void add_copy(FPGADeviceMemcpy *copy);
-            // bool issue_copies(TimeLimit work_until);
+            void add_copy(FPGADeviceMemcpy *copy);
+            bool issue_copies(TimeLimit work_until);
             void add_event(cl::Event opencl_event,
                            FPGAWorkFence *fence,
-                           FPGADeviceCompletionNotification *n = 0);
+                           FPGACompletionNotification *n = 0);
 
         protected:
             // may only be tested with lock held
@@ -114,11 +108,10 @@ namespace Realm
             {
                 cl::Event opencl_event;
                 FPGAWorkFence *fence;
-                FPGADeviceCompletionNotification *notification;
+                FPGACompletionNotification *notification;
             };
             std::deque<PendingEvent> pending_events;
-            // std::deque<FPGADeviceMemcpy *> pending_copies;
-            std::deque<PendingEvent> pending_copies;
+            std::deque<FPGADeviceMemcpy *> pending_copies;
         };
 
         class FPGADeviceMemory;
@@ -132,21 +125,74 @@ namespace Realm
             cl::Context context;
             cl::CommandQueue command_queue;
             cl::Program program;
-            FPGADevice(cl::Device device, std::string name, std::string xclbin, FPGAWorker *fpga_worker);
+            FPGADevice(cl::Device &device, std::string name, std::string xclbin, FPGAWorker *fpga_worker);
             ~FPGADevice();
             void create_fpga_mem(RuntimeImpl *runtime, size_t size);
             void create_dma_channels(RuntimeImpl *runtime);
             void create_fpga_queues();
-            void copy_to_fpga(off_t dst_offset, const void *src, size_t bytes, FPGACompletionEvent *event);
-            void copy_from_fpga(void *dst, off_t src_offset, size_t bytes, FPGACompletionEvent *event);
-            void copy_within_fpga(off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionEvent *event);
-            void copy_to_peer(FPGADevice *dst, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionEvent *event);
-            void copy_to_fpga_comp(off_t dst_offset, const void *src, size_t bytes, FPGACompletionEvent *event);
-            void copy_from_fpga_comp(void *dst, off_t src_offset, size_t bytes, FPGACompletionEvent *event);
+            void copy_to_fpga(off_t dst_offset, const void *src, size_t bytes, FPGACompletionNotification *event);
+            void copy_from_fpga(void *dst, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
+            void copy_within_fpga(off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
+            void copy_to_peer(FPGADevice *dst, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
+            void copy_to_fpga_comp(off_t dst_offset, const void *src, size_t bytes, FPGACompletionNotification *event);
+            void copy_from_fpga_comp(void *dst, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
             FPGADeviceMemory *fpga_mem;
             MemoryImpl *local_sysmem;
             IBMemory *local_ibmem;
             FPGAWorker *fpga_worker;
+            FPGAQueue *fpga_queue;
+        };
+
+        enum FPGAMemcpyKind
+        {
+            FPGA_MEMCPY_HOST_TO_DEVICE,
+            FPGA_MEMCPY_DEVICE_TO_HOST,
+            FPGA_MEMCPY_DEVICE_TO_DEVICE,
+            FPGA_MEMCPY_PEER_TO_PEER,
+        };
+
+        // An abstract base class for all FPGA memcpy operations
+        class FPGADeviceMemcpy
+        {
+        public:
+            FPGADeviceMemcpy(FPGADevice *fpga_device, FPGAMemcpyKind kind, FPGACompletionNotification *notification);
+            virtual ~FPGADeviceMemcpy(void) {}
+
+        public:
+            virtual void execute(FPGAQueue *queue) = 0;
+
+        public:
+            FPGADevice *const fpga_device;
+
+        protected:
+            FPGAMemcpyKind kind;
+            FPGACompletionNotification *notification;
+        };
+
+        class FPGADeviceMemcpy1D : public FPGADeviceMemcpy
+        {
+        public:
+            FPGADeviceMemcpy1D(FPGADevice *fpga_device,
+                               void *dst,
+                               const void *src,
+                               size_t bytes,
+                               off_t buff_offset,
+                               FPGAMemcpyKind _kind,
+                               FPGACompletionNotification *_notification);
+
+            virtual ~FPGADeviceMemcpy1D(void);
+
+        public:
+            virtual void execute(FPGAQueue *q);
+
+        protected:
+            void *dst;
+            const void *src;
+            size_t elmt_size;
+            off_t buff_offset;
+
+        private:
+            void do_span(off_t pos, size_t len);
             FPGAQueue *fpga_queue;
         };
 

@@ -188,8 +188,8 @@ namespace Realm
                     // out of time - save it for later
                     requeue_q = true;
                 }
-                // else if (queue->issue_copies(work_until))
-                //     requeue_q = true;
+                else if (queue->issue_copies(work_until))
+                    requeue_q = true;
             }
 
             bool was_empty = false;
@@ -247,8 +247,8 @@ namespace Realm
                 // reap_events report whether any kind of work
                 if (!cur_queue->reap_events(TimeLimit()))
                     continue;
-                // if (!cur_queue->issue_copies(TimeLimit()))
-                //     continue;
+                if (!cur_queue->issue_copies(TimeLimit()))
+                    continue;
                 // if we fall, the queues never went empty at any time, so it's up to us to requeue
                 requeue_queue = true;
             }
@@ -306,8 +306,12 @@ namespace Realm
         {
         }
 
-        void
-        FPGAQueue::add_fence(FPGAWorkFence *fence)
+        cl::CommandQueue &FPGAQueue::get_command_queue() const
+        {
+            return command_queue;
+        }
+
+        void FPGAQueue::add_fence(FPGAWorkFence *fence)
         {
             cl::Event opencl_event;
             cl_int err = 0;
@@ -315,10 +319,19 @@ namespace Realm
             add_event(opencl_event, fence, 0);
         }
 
+        void FPGAQueue::add_notification(FPGACompletionNotification *notification)
+        {
+            cl::Event opencl_event;
+            cl_int err = 0;
+            OCL_CHECK(err, err = command_queue.enqueueMarkerWithWaitList(nullptr, &opencl_event));
+
+            add_event(opencl_event, 0, notification);
+        }
+
         // add event to worker so it can be progressed
         void FPGAQueue::add_event(cl::Event opencl_event,
                                   FPGAWorkFence *fence,
-                                  FPGADeviceCompletionNotification *n)
+                                  FPGACompletionNotification *n)
 
         {
             bool add_to_worker = false;
@@ -349,7 +362,7 @@ namespace Realm
         {
             // peek at the first event
             cl::Event opencl_event;
-            FPGADeviceCompletionNotification *notification = 0;
+            FPGACompletionNotification *notification = 0;
             bool event_valid = false;
             {
                 AutoLock<> al(mutex);
@@ -417,56 +430,56 @@ namespace Realm
             return work_left;
         }
 
-        // void FPGAQueue::add_copy(FPGADeviceMemcpy *copy)
-        // {
-        //     bool add_to_worker = false;
-        //     {
-        //         AutoLock<> al(mutex);
-        //         // add if we haven't been added yet
-        //         add_to_worker =
-        //             pending_copies.empty() && pending_events.empty();
-        //         pending_copies.push_back(copy);
-        //     }
-        //     if (add_to_worker)
-        //         fpga_worker->add_queue(this);
-        // }
+        void FPGAQueue::add_copy(FPGADeviceMemcpy *copy)
+        {
+            bool add_to_worker = false;
+            {
+                AutoLock<> al(mutex);
+                // add if we haven't been added yet
+                add_to_worker =
+                    pending_copies.empty() && pending_events.empty();
+                pending_copies.push_back(copy);
+            }
+            if (add_to_worker)
+                fpga_worker->add_queue(this);
+        }
 
-        // bool FPGAQueue::issue_copies(TimeLimit work_until)
-        // {
-        //     while (true)
-        //     {
-        //         // if we cause the list to go empty,
-        //         // we stop even if more copies show
-        //         // up because we don't want to requeue ourselves twice
-        //         bool list_exhausted = false;
-        //         FPGADeviceMemcpy *copy = 0;
-        //         {
-        //             AutoLock<> al(mutex);
-        //             if (pending_copies.empty())
-        //                 // no copies left,
-        //                 // but queue might have other work left
-        //                 return has_work();
-        //             copy = pending_copies.front();
-        //             pending_copies.pop_front();
-        //             list_exhausted = !has_work();
-        //         }
-        //         copy->execute(this);
-        //         delete copy;
-        //         // if the list was exhausted, let the caller know
-        //         if (list_exhausted)
-        //             return false;
+        bool FPGAQueue::issue_copies(TimeLimit work_until)
+        {
+            while (true)
+            {
+                // if we cause the list to go empty,
+                // we stop even if more copies show
+                // up because we don't want to requeue ourselves twice
+                bool list_exhausted = false;
+                FPGADeviceMemcpy *copy = 0;
+                {
+                    AutoLock<> al(mutex);
+                    if (pending_copies.empty())
+                        // no copies left,
+                        // but queue might have other work left
+                        return has_work();
+                    copy = pending_copies.front();
+                    pending_copies.pop_front();
+                    list_exhausted = !has_work();
+                }
+                copy->execute(this);
+                delete copy;
+                // if the list was exhausted, let the caller know
+                if (list_exhausted)
+                    return false;
 
-        //         // if we still have work, but time's up, return also
-        //         if (work_until.is_expired())
-        //             return true;
-        //     }
-        //     return false; // should never reach here
-        // }
+                // if we still have work, but time's up, return also
+                if (work_until.is_expired())
+                    return true;
+            }
+            return false; // should never reach here
+        }
 
         // ---------------------------------------------
         // class FPGADevice
         // ---------------------------------------------
-        FPGADevice::FPGADevice(cl::Device device, std::string name, std::string xclbin, FPGAWorker *fpga_worker) : name(name), fpga_worker(fpga_worker)
+        FPGADevice::FPGADevice(cl::Device &device, std::string name, std::string xclbin, FPGAWorker *fpga_worker) : name(name), fpga_worker(fpga_worker)
         {
             cl_int err;
             this->device = device;
@@ -584,26 +597,36 @@ namespace Realm
             fpga_queue = new FPGAQueue(this, fpga_worker, command_queue);
         }
 
-        void FPGADevice::copy_to_fpga(off_t dst_offset, const void *src, size_t bytes, FPGACompletionEvent *event)
+        void FPGADevice::copy_to_fpga(off_t dst_offset, const void *src, size_t bytes, FPGACompletionNotification *event)
         {
-            size_t dst = reinterpret_cast<size_t>((uint8_t *)(fpga_mem->base_ptr_sys) + dst_offset);
+            void *dst = (void *)((uint8_t *)(fpga_mem->base_ptr_sys) + dst_offset);
             log_fpga.info() << "copy_to_fpga: src = " << src << " dst_offset = " << dst_offset
                             << " bytes = " << bytes << " dst = " << (int *)dst << "\n";
             // fpga_memcpy_2d(reinterpret_cast<uintptr_t>(dst), 0,
             //                reinterpret_cast<uintptr_t>(src), 0,
             //                bytes, 1);
-            cl_int err = 0;
+            // cl_int err = 0;
             // cl_buffer_region buff_copy_info = {(size_t)dst_offset, bytes};
             // cl::Buffer temp_copy_buff;
             // OCL_CHECK(err, temp_copy_buff = buff.createSubBuffer(CL_MEM_HOST_WRITE_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &buff_copy_info, nullptr));
             // OCL_CHECK(err, err = command_queue.enqueueMigrateMemObjects({temp_copy_buff}, 0 /* 0 means from host*/));
             // OCL_CHECK(err, err = command_queue.finish());
-            OCL_CHECK(err, err = command_queue.enqueueWriteBuffer(buff,        // buffer on the FPGA
-                                                                  CL_TRUE,     // blocking call
-                                                                  dst_offset,  // buffer offset in bytes
-                                                                  bytes,       // Size in bytes
-                                                                  (void *)src, // Pointer to the data to copy
-                                                                  nullptr, nullptr));
+
+            // OCL_CHECK(err, err = command_queue.enqueueWriteBuffer(buff,        // buffer on the FPGA
+            //                                                       CL_TRUE,     // blocking call
+            //                                                       dst_offset,  // buffer offset in bytes
+            //                                                       bytes,       // Size in bytes
+            //                                                       (void *)src, // Pointer to the data to copy
+            //                                                       nullptr, nullptr));
+
+            FPGADeviceMemcpy *copy = new FPGADeviceMemcpy1D(this,
+                                                            dst,
+                                                            src,
+                                                            bytes,
+                                                            dst_offset,
+                                                            FPGA_MEMCPY_HOST_TO_DEVICE,
+                                                            event);
+            fpga_queue->add_copy(copy);
 
             // xclSyncBO(this->dev_handle, this->bo_handle, XCL_BO_SYNC_BO_TO_DEVICE, bytes, dst_offset);
 
@@ -618,18 +641,18 @@ namespace Realm
             //   }
             // }
             // printf("\n");
-            FPGARequest *req = event->req;
-            XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
-            XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
-            in_port->iter->confirm_step();
-            out_port->iter->confirm_step();
+            // FPGARequest *req = event->req;
+            // XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
+            // XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
+            // in_port->iter->confirm_step();
+            // out_port->iter->confirm_step();
 
-            event->request_completed();
+            // event->request_completed();
         }
 
-        void FPGADevice::copy_from_fpga(void *dst, off_t src_offset, size_t bytes, FPGACompletionEvent *event)
+        void FPGADevice::copy_from_fpga(void *dst, off_t src_offset, size_t bytes, FPGACompletionNotification *event)
         {
-            size_t src = reinterpret_cast<size_t>((uint8_t *)(fpga_mem->base_ptr_sys) + src_offset);
+            void *src = (void *)((uint8_t *)(fpga_mem->base_ptr_sys) + src_offset);
             log_fpga.info() << "copy_from_fpga: dst = " << dst << " src_offset = " << src_offset
                             << " bytes = " << bytes << " src = " << (int *)src << "\n";
             // xclSyncBO(this->dev_handle, this->bo_handle, XCL_BO_SYNC_BO_FROM_DEVICE, bytes, src_offset);
@@ -642,18 +665,27 @@ namespace Realm
             //                                 nullptr, &async_event);
             // async_event.wait();
 
-            cl_int err = 0;
+            // cl_int err = 0;
             // cl_buffer_region buff_copy_info = {(size_t)src_offset, bytes};
             // cl::Buffer temp_copy_buff;
             // OCL_CHECK(err, temp_copy_buff = buff.createSubBuffer(CL_MEM_HOST_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &buff_copy_info, nullptr));
             // OCL_CHECK(err, err = command_queue.enqueueMigrateMemObjects({temp_copy_buff}, CL_MIGRATE_MEM_OBJECT_HOST));
             // OCL_CHECK(err, err = command_queue.finish());
-            OCL_CHECK(err, err = command_queue.enqueueReadBuffer(buff,       // buffer on the FPGA
-                                                                 CL_TRUE,    // blocking call
-                                                                 src_offset, // buffer offset in bytes
-                                                                 bytes,      // Size in bytes
-                                                                 dst,        // Pointer to the data to copy
-                                                                 nullptr, nullptr));
+            // OCL_CHECK(err, err = command_queue.enqueueReadBuffer(buff,       // buffer on the FPGA
+            //                                                      CL_TRUE,    // blocking call
+            //                                                      src_offset, // buffer offset in bytes
+            //                                                      bytes,      // Size in bytes
+            //                                                      dst,        // Pointer to the data to copy
+            //                                                      nullptr, nullptr));
+
+            FPGADeviceMemcpy *copy = new FPGADeviceMemcpy1D(this,
+                                                            dst,
+                                                            src,
+                                                            bytes,
+                                                            src_offset,
+                                                            FPGA_MEMCPY_DEVICE_TO_HOST,
+                                                            event);
+            fpga_queue->add_copy(copy);
 
             // fpga_memcpy_2d(reinterpret_cast<uintptr_t>(dst), 0,
             //                reinterpret_cast<uintptr_t>(src), 0,
@@ -670,52 +702,59 @@ namespace Realm
             // }
             // printf("\n");
 
-            printf("copy_from_fpga: ");
-            for (int i = 0; i < 40; i++)
-            {
-                printf("%d ", ((int *)(fpga_mem->base_ptr_sys))[i]);
-            }
-            printf("\n");
-            for (int i = 0; i < 40; i++)
-            {
-                printf("%d-", ((int *)dst)[i]);
-            }
-            printf("\n");
-            FPGARequest *req = event->req;
-            XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
-            XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
-            in_port->iter->confirm_step();
-            out_port->iter->confirm_step();
+            // printf("copy_from_fpga: ");
+            // for (int i = 0; i < 40; i++)
+            // {
+            //     printf("%d ", ((int *)(fpga_mem->base_ptr_sys))[i]);
+            // }
+            // printf("\n");
+            // for (int i = 0; i < 40; i++)
+            // {
+            //     printf("%d-", ((int *)dst)[i]);
+            // }
+            // printf("\n");
 
-            event->request_completed();
+            // event->request_completed();
         }
 
-        void FPGADevice::copy_within_fpga(off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionEvent *event)
+        void FPGADevice::copy_within_fpga(off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event)
         {
-            log_fpga.info() << "copy_within_fpga(not implemented!): dst_offset = " << dst_offset << " src_offset = " << src_offset
+            log_fpga.info() << "copy_within_fpga: dst_offset = " << dst_offset << " src_offset = " << src_offset
                             << " bytes = " << bytes << "\n";
-            FPGARequest *req = event->req;
-            XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
-            XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
-            in_port->iter->confirm_step();
-            out_port->iter->confirm_step();
-            event->request_completed();
+            void *src = (void *)((uint8_t *)(fpga_mem->base_ptr_sys) + src_offset);
+            void *dst = (void *)((uint8_t *)(fpga_mem->base_ptr_sys) + dst_offset);
+            FPGADeviceMemcpy *copy = new FPGADeviceMemcpy1D(this,
+                                                            dst,
+                                                            src,
+                                                            bytes,
+                                                            dst_offset,
+                                                            FPGA_MEMCPY_DEVICE_TO_DEVICE,
+                                                            event);
+            fpga_queue->add_copy(copy);
+
+            // FPGARequest *req = event->req;
+            // XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
+            // XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
+            // in_port->iter->confirm_step();
+            // out_port->iter->confirm_step();
+            // event->request_completed();
         }
 
-        void FPGADevice::copy_to_peer(FPGADevice *dst, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionEvent *event)
+        void FPGADevice::copy_to_peer(FPGADevice *dst, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event)
         {
             log_fpga.info() << "copy_to_peer(not implemented!): dst = " << dst << " dst_offset = " << dst_offset
                             << " bytes = " << bytes << " event = " << event << "\n";
-            FPGARequest *req = event->req;
-            XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
-            XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
-            in_port->iter->confirm_step();
-            out_port->iter->confirm_step();
-            event->request_completed();
+            assert(0);
+            // FPGARequest *req = event->req;
+            // XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
+            // XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
+            // in_port->iter->confirm_step();
+            // out_port->iter->confirm_step();
+            // event->request_completed();
         }
 
         // decompress data after moving data from ib memory to fpga device memory
-        void FPGADevice::copy_to_fpga_comp(off_t dst_offset, const void *src, size_t bytes, FPGACompletionEvent *event)
+        void FPGADevice::copy_to_fpga_comp(off_t dst_offset, const void *src, size_t bytes, FPGACompletionNotification *event)
         {
             // size_t i;
             size_t dst = reinterpret_cast<size_t>((uint8_t *)(fpga_mem->base_ptr_sys) + dst_offset);
@@ -723,23 +762,23 @@ namespace Realm
             log_fpga.info() << "copy_to_fpga_comp: src = " << src << " dst_offset = " << dst_offset
                             << " bytes = " << bytes << " dst = " << temp << "\n";
 
-            FPGARequest *req = event->req;
-            XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
-            XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
-            out_port->iter->confirm_step();
-            in_port->iter->cancel_step();
-            TransferIterator::AddressInfo src_info;
-            size_t bytes_avail = in_port->iter->step(bytes,
-                                                     src_info,
-                                                     0,
-                                                     false /*!tentative*/);
-            log_fpga.info() << "(src_info) base_offset: " << src_info.base_offset
-                            << " bytes_per_chunk: " << src_info.bytes_per_chunk
-                            << " num_lines: " << src_info.num_lines
-                            << " line_stride: " << src_info.line_stride
-                            << " num_planes: " << src_info.num_planes
-                            << " plane_stride: " << src_info.plane_stride
-                            << " bytes_avail: " << bytes_avail;
+            // FPGARequest *req = event->req;
+            // XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
+            // XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
+            // out_port->iter->confirm_step();
+            // in_port->iter->cancel_step();
+            // TransferIterator::AddressInfo src_info;
+            // size_t bytes_avail = in_port->iter->step(bytes,
+            //                                          src_info,
+            //                                          0,
+            //                                          false /*!tentative*/);
+            // log_fpga.info() << "(src_info) base_offset: " << src_info.base_offset
+            //                 << " bytes_per_chunk: " << src_info.bytes_per_chunk
+            //                 << " num_lines: " << src_info.num_lines
+            //                 << " line_stride: " << src_info.line_stride
+            //                 << " num_planes: " << src_info.num_planes
+            //                 << " plane_stride: " << src_info.plane_stride
+            //                 << " bytes_avail: " << bytes_avail;
 
             // // create a temp BO to store compressed data
             // xclBufferHandle bo_temp;
@@ -834,11 +873,11 @@ namespace Realm
             //   }
             // }
             // printf("\n");
-            event->request_completed();
+            // event->request_completed();
         }
 
         // compress data before moving data from fpga device memory to ib memory
-        void FPGADevice::copy_from_fpga_comp(void *dst, off_t src_offset, size_t bytes, FPGACompletionEvent *event)
+        void FPGADevice::copy_from_fpga_comp(void *dst, off_t src_offset, size_t bytes, FPGACompletionNotification *event)
         {
             // size_t i;
             size_t src = reinterpret_cast<size_t>((uint8_t *)(fpga_mem->base_ptr_sys) + src_offset);
@@ -909,7 +948,7 @@ namespace Realm
             // }
 
             // xclSyncBO(this->dev_handle, bo_temp, XCL_BO_SYNC_BO_FROM_DEVICE, bytes, 0);
-            size_t new_bytes = bytes;
+            // size_t new_bytes = bytes;
             // while (bo_temp_host[new_bytes] != '\0')
             // {
             //   if (bo_temp_host[new_bytes] == '@')
@@ -939,41 +978,136 @@ namespace Realm
             //   }
             // }
             // printf("\n");
-            FPGARequest *req = event->req;
-            XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
-            XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
-            in_port->iter->confirm_step();
-            if (new_bytes == bytes)
+            // FPGARequest *req = event->req;
+            // XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
+            // XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
+            // in_port->iter->confirm_step();
+            // if (new_bytes == bytes)
+            // {
+            //     out_port->iter->confirm_step();
+            // }
+            // else
+            // {
+            //     out_port->iter->cancel_step();
+            //     TransferIterator::AddressInfo dst_info;
+            //     size_t bytes_avail = out_port->iter->step(new_bytes,
+            //                                               dst_info,
+            //                                               0,
+            //                                               false /*!tentative*/);
+            //     assert(bytes_avail == new_bytes);
+            //     out_port->local_bytes_total = new_bytes;
+            //     out_port->local_bytes_cons.store(out_port->local_bytes_total); // completion detection uses this
+            //     req->xd->update_bytes_write(0, req->xd->output_ports[0].local_bytes_total, 0);
+            //     // size_t rewind_dst = bytes - new_bytes;
+            //     // out_port->local_bytes_cons.fetch_sub(rewind_dst);
+            //     // req->xd->update_bytes_write(0, new_bytes, 0);
+            //     req->write_seq_count = out_port->local_bytes_total;
+            //     log_fpga.info() << "(dst_info) base_offset: " << dst_info.base_offset
+            //                     << " bytes_per_chunk: " << dst_info.bytes_per_chunk
+            //                     << " num_lines: " << dst_info.num_lines
+            //                     << " line_stride: " << dst_info.line_stride
+            //                     << " num_planes: " << dst_info.num_planes
+            //                     << " plane_stride: " << dst_info.plane_stride
+            //                     << " local_bytes_total: " << out_port->local_bytes_total
+            //                     << " write_seq_pos: " << req->write_seq_count
+            //                     << " write_seq_count: " << req->write_seq_pos;
+            // }
+            // event->request_completed();
+        }
+
+        //-----------------------------------------------
+        // Device Memory Copy Operations
+        //-----------------------------------------------
+        FPGADeviceMemcpy::FPGADeviceMemcpy(FPGADevice *fpga_device,
+                                           FPGAMemcpyKind kind,
+                                           FPGACompletionNotification *notification)
+            : fpga_device(fpga_device), kind(kind), notification(notification)
+        {
+        }
+
+        //-------------------------------------------------
+        // 1D Memory Copy Operation
+        //-------------------------------------------------
+        FPGADeviceMemcpy1D::FPGADeviceMemcpy1D(FPGADevice *fpga_device,
+                                               void *dst,
+                                               const void *src,
+                                               size_t bytes,
+                                               off_t buff_offset,
+                                               FPGAMemcpyKind kind,
+                                               FPGACompletionNotification *notification)
+            : FPGADeviceMemcpy(fpga_device, kind, notification),
+              dst(dst), src(src), elmt_size(bytes), buff_offset(buff_offset)
+        {
+        }
+
+        FPGADeviceMemcpy1D::~FPGADeviceMemcpy1D(void)
+        {
+        }
+
+        void FPGADeviceMemcpy1D::do_span(off_t pos, size_t len)
+        {
+            off_t span_start = pos * elmt_size;
+            size_t span_bytes = len * elmt_size;
+            void *dstptr = ((uint8_t *)dst) + span_start;
+            void *srcptr = ((uint8_t *)src) + span_start;
+            size_t size = span_bytes;
+            cl_int err = 0;
+            log_fpga.debug() << "do_span: buff_offset " << buff_offset << " size " << size << " srcptr " << srcptr << " dstptr " << dstptr;
+            if (kind == FPGA_MEMCPY_HOST_TO_DEVICE)
             {
-                out_port->iter->confirm_step();
+                OCL_CHECK(err, err = fpga_queue->get_command_queue().enqueueWriteBuffer(fpga_device->buff, // buffer on the FPGA
+                                                                                        CL_FALSE,          // blocking call
+                                                                                        buff_offset,       // buffer offset in bytes
+                                                                                        size,              // Size in bytes
+                                                                                        (void *)srcptr,    // Pointer to the data to copy
+                                                                                        nullptr, nullptr));
+            }
+            else if (kind == FPGA_MEMCPY_DEVICE_TO_HOST)
+            {
+                OCL_CHECK(err, err = fpga_queue->get_command_queue().enqueueReadBuffer(fpga_device->buff, // buffer on the FPGA
+                                                                                       CL_FALSE,          // blocking call
+                                                                                       buff_offset,       // buffer offset in bytes
+                                                                                       size,              // Size in bytes
+                                                                                       (void *)dstptr,    // Pointer to the data to copy
+                                                                                       nullptr, nullptr));
+            }
+            else if (kind == FPGA_MEMCPY_DEVICE_TO_DEVICE)
+            {
+                OCL_CHECK(err, err = fpga_queue->get_command_queue().enqueueWriteBuffer(fpga_device->buff, // buffer on the FPGA
+                                                                                        CL_FALSE,          // blocking call
+                                                                                        buff_offset,       // buffer offset in bytes
+                                                                                        size,              // Size in bytes
+                                                                                        (void *)srcptr,    // Pointer to the data to copy
+                                                                                        nullptr, nullptr));
+            }
+            else if (kind == FPGA_MEMCPY_PEER_TO_PEER)
+            {
+                log_fpga.error() << "FPGA_MEMCPY_PEER_TO_PEER not implemented";
+                assert(0);
             }
             else
             {
-                out_port->iter->cancel_step();
-                TransferIterator::AddressInfo dst_info;
-                size_t bytes_avail = out_port->iter->step(new_bytes,
-                                                          dst_info,
-                                                          0,
-                                                          false /*!tentative*/);
-                assert(bytes_avail == new_bytes);
-                out_port->local_bytes_total = new_bytes;
-                out_port->local_bytes_cons.store(out_port->local_bytes_total); // completion detection uses this
-                req->xd->update_bytes_write(0, req->xd->output_ports[0].local_bytes_total, 0);
-                // size_t rewind_dst = bytes - new_bytes;
-                // out_port->local_bytes_cons.fetch_sub(rewind_dst);
-                // req->xd->update_bytes_write(0, new_bytes, 0);
-                req->write_seq_count = out_port->local_bytes_total;
-                log_fpga.info() << "(dst_info) base_offset: " << dst_info.base_offset
-                                << " bytes_per_chunk: " << dst_info.bytes_per_chunk
-                                << " num_lines: " << dst_info.num_lines
-                                << " line_stride: " << dst_info.line_stride
-                                << " num_planes: " << dst_info.num_planes
-                                << " plane_stride: " << dst_info.plane_stride
-                                << " local_bytes_total: " << out_port->local_bytes_total
-                                << " write_seq_pos: " << req->write_seq_count
-                                << " write_seq_count: " << req->write_seq_pos;
+                log_fpga.error() << "FPGADeviceMemcpy kind error";
+                assert(0);
             }
-            event->request_completed();
+            OCL_CHECK(err, err = fpga_queue->get_command_queue().flush());
+        }
+
+        void FPGADeviceMemcpy1D::execute(FPGAQueue *queue)
+        {
+            DetailedTimer::ScopedPush sp(TIME_COPY);
+            log_fpga.info("FPGADevice memcpy: dst=%p src=%p bytes=%zd kind=%d",
+                          dst, src, elmt_size, kind);
+            // save queue into local variable
+            // for do_span (which may be called indirectly by ElementMask::forall_ranges)
+            fpga_queue = queue;
+            do_span(0, 1);
+            if (notification)
+            {
+                fpga_queue->add_notification(notification);
+            }
+            log_fpga.info("fpga memcpy 1d issued: dst=%p src=%p bytes=%zd kind=%d",
+                          dst, src, elmt_size, kind);
         }
 
         FPGAModule::FPGAModule() : Module("fpga"), cfg_num_fpgas(0), cfg_use_worker_threads(false), cfg_use_shared_worker(true), cfg_fpga_mem_size(4 << 20)
@@ -1072,7 +1206,7 @@ namespace Realm
                 FPGADevice *fpga_device = new FPGADevice(devices[i], "fpga" + std::to_string(i), cfg_fpga_xclbin, worker);
                 fpga_devices.push_back(fpga_device);
 
-                if (!cfg_use_shared_worker) 
+                if (!cfg_use_shared_worker)
                 {
                     log_fpga.info() << "add to dedicated workers " << worker;
                     dedicated_workers[fpga_device] = worker;
@@ -1294,7 +1428,7 @@ namespace Realm
         {
         }
 
-        FPGADeviceMemory::~FPGADeviceMemory(void) 
+        FPGADeviceMemory::~FPGADeviceMemory(void)
         {
             // this function is invoked before ~FPGADevice
             if (base_ptr_sys != nullptr)
@@ -1325,6 +1459,12 @@ namespace Realm
 
         void FPGACompletionEvent::request_completed(void)
         {
+            log_fpga.info() << "in request_completed " << req;
+            XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
+            XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
+            in_port->iter->confirm_step();
+            out_port->iter->confirm_step();
+
             req->xd->notify_request_read_done(req);
             req->xd->notify_request_write_done(req);
         }
@@ -2404,6 +2544,7 @@ namespace Realm
             //                   TransferIterator::PLANES_OK);
             unsigned flags = 0;
             long new_nr = default_get_requests_tentative(requests, nr, flags);
+            // long new_nr = default_get_requests(requests, nr, flags);
             for (long i = 0; i < new_nr; i++)
             {
                 switch (kind)
