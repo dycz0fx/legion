@@ -50,7 +50,6 @@ void fpga_task(const void *args, size_t arglen,
                                                          FID_Z);
     size_t data_size = local_args.bounds.volume();
 
-    // program device
     int num_cu = DEFAULT_COMP_UNITS;
     std::vector<cl::Kernel> krnls(num_cu);
     cl::Program program = FPGAGetCurrentProgram();
@@ -96,7 +95,6 @@ void fpga_task(const void *args, size_t arglen,
         // Launch the kernel
         OCL_CHECK(err, err = command_queue.enqueueTask(krnls[i], nullptr, &task_events[i]));
     }
-    // OCL_CHECK(err, err = command_queue.finish());
 
     std::vector<cl::Event> wait_events[num_cu];
     // Copy result from device global memory to host local memory
@@ -106,6 +104,7 @@ void fpga_task(const void *args, size_t arglen,
     }
     // OCL_CHECK(err, err = command_queue.finish());
     OCL_CHECK(err, err = command_queue.flush());
+    
     log_app.print() << "fpga kernels flushed";
 }
 
@@ -288,11 +287,9 @@ void top_level_task(const void *args, size_t arglen,
 
 int main(int argc, char **argv)
 {
-    sleep(20);
+    // sleep(20);
     Runtime rt;
-
     rt.init(&argc, &argv);
-
     rt.register_task(TOP_LEVEL_TASK, top_level_task);
 
     Processor::register_task_by_kind(Processor::FPGA_PROC, false /*!global*/,

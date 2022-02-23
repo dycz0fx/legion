@@ -3370,67 +3370,92 @@ namespace Realm {
 	    Memory dst_mem = dsts[i].inst.get_location();
 
 	    MemPathInfo path_info;
-            // add a special case for the compression and decompression example, TODO only invoke this when messages are big
-	    std::cout << "src_mem.kind() = " << src_mem.kind() << " dst_mem.kind() = " << dst_mem.kind() << std::endl;
-      if (src_mem.kind() == Memory::FPGA_MEM and dst_mem.kind() == Memory::FPGA_MEM and src_mem.address_space() != dst_mem.address_space()) {
-              Node* src_node = &(get_runtime()->nodes[ID(src_mem).memory_owner_node()]);
-              Memory src_ibmem;
-              for (std::vector<IBMemory *>::const_iterator it = src_node->ib_memories.begin();
-                it != src_node->ib_memories.end(); it++) {
-                if ((*it)->lowlevel_kind == Memory::REGDMA_MEM) 
+#ifdef REALM_USE_FPGA_COPROCESSOR
+        // add a special case for using FPGA as coprocessor
+        std::cout << "src_mem.kind() = " << src_mem.kind() << " dst_mem.kind() = " << dst_mem.kind() << std::endl;
+        if (src_mem.kind() == Memory::SYSTEM_MEM and dst_mem.kind() == Memory::SYSTEM_MEM and src_mem.address_space() == dst_mem.address_space())
+        // if (src_mem.kind() == Memory::SYSTEM_MEM and dst_mem.kind() == Memory::SYSTEM_MEM and src_mem.address_space() != dst_mem.address_space())
+        {
+            Node *src_node = &(get_runtime()->nodes[ID(src_mem).memory_owner_node()]);
+            Memory src_fpgamem;
+            for (std::vector<IBMemory *>::const_iterator it = src_node->ib_memories.begin();
+                 it != src_node->ib_memories.end(); it++)
+            {
+                if ((*it)->lowlevel_kind == Memory::FPGA_MEM)
                 {
-                  src_ibmem = (*it)->me;
-                  std::cout << "src_ibmem " << std::hex << (*it)->me.id << std::dec << " kind: " << (*it)->kind << " low-level kind: " << (*it)->lowlevel_kind << std::endl;
+                    src_fpgamem = (*it)->me;
+                    std::cout << "src_fpgamem " << std::hex << (*it)->me.id << std::dec << " base_ptr: " << (*it)->get_direct_ptr(0, 0) << " kind: " << (*it)->kind << " low-level kind: " << (*it)->lowlevel_kind << std::endl;
+                }
+            }
+            Node *dst_node = &(get_runtime()->nodes[ID(dst_mem).memory_owner_node()]);
+            Memory dst_fpgamem;
+            for (std::vector<IBMemory *>::const_iterator it = dst_node->ib_memories.begin();
+                 it != dst_node->ib_memories.end(); it++)
+            {
+                if ((*it)->lowlevel_kind == Memory::FPGA_MEM)
+                {
+                    dst_fpgamem = (*it)->me;
+                    std::cout << "dst_fpgamem " << std::hex << (*it)->me.id << std::dec << " base_ptr: " << (*it)->get_direct_ptr(0, 0) << " kind: " << (*it)->kind << " low-level kind: " << (*it)->lowlevel_kind << std::endl;
+                }
+            }
+            path_info.path.clear();
+            path_info.path.push_back(src_mem);
+            path_info.path.push_back(src_fpgamem);
+            path_info.path.push_back(dst_fpgamem);
+            path_info.path.push_back(dst_mem);
 
-                }
-              }
-              Node* dst_node = &(get_runtime()->nodes[ID(dst_mem).memory_owner_node()]);
-              Memory dst_ibmem;
-              for (std::vector<IBMemory *>::const_iterator it = dst_node->ib_memories.begin();
-                it != dst_node->ib_memories.end(); it++) {
-                if ((*it)->lowlevel_kind == Memory::REGDMA_MEM) 
+            for (std::vector<Channel *>::const_iterator it = src_node->dma_channels.begin();
+                 it != src_node->dma_channels.end();
+                 ++it)
+            {
+                if ((*it)->supports_path(src_mem, src_fpgamem, serdez_id, 0, 0))
                 {
-                  dst_ibmem = (*it)->me;
-                  std::cout << "dst_ibmem " << std::hex << (*it)->me.id << std::dec << " kind: " << (*it)->kind << " low-level kind: " << (*it)->lowlevel_kind << std::endl;
+                    std::cout << "add src_mem to src_fpgamem" << std::endl;
+                    path_info.xd_channels.push_back(*it);
+                    break;
                 }
-              }
-              path_info.path.clear();
-              path_info.path.push_back(src_mem);
-              path_info.path.push_back(src_ibmem);
-              path_info.path.push_back(dst_ibmem);
-              path_info.path.push_back(dst_mem);
-        
-              for(std::vector<Channel *>::const_iterator it = src_node->dma_channels.begin();
-	          it != src_node->dma_channels.end();
-	          ++it) {
-                if ((*it)->kind == XFER_FPGA_FROM_DEV_COMP) {
-                  path_info.xd_channels.push_back(*it);
-                }
-              }
-              for(std::vector<Channel *>::const_iterator it = src_node->dma_channels.begin();
-	          it != src_node->dma_channels.end();
-	          ++it) {
-                if ((*it)->supports_path(src_ibmem, dst_ibmem, serdez_id, 0, 0))
-                path_info.xd_channels.push_back(*it);
-              }
-              for(std::vector<Channel *>::const_iterator it = dst_node->dma_channels.begin();
-	          it != dst_node->dma_channels.end();
-	          ++it) {
-                if ((*it)->kind == XFER_FPGA_TO_DEV_COMP) {
-                  path_info.xd_channels.push_back(*it);
-                }
-              }
-              std::cout << "create special path for compression and decompression" << std::endl;
             }
-            else {
-	      bool ok = find_shortest_path(src_mem, dst_mem, serdez_id,
-                                           0 /*redop_id*/,
-		    			   path_info);
-	      if(!ok) {
-	        log_new_dma.fatal() << "FATAL: no path found from " << src_mem << " to " << dst_mem << " (serdez=" << serdez_id << ")";
-	        assert(0);
-	      }
+            for (std::vector<Channel *>::const_iterator it = src_node->dma_channels.begin();
+                 it != src_node->dma_channels.end();
+                 ++it)
+            {
+                if ((*it)->kind == XFER_FPGA_COMP && (*it)->supports_path(src_fpgamem, dst_fpgamem, serdez_id, 0, 0))
+                {
+                    std::cout << "add src_fpgamem to dst_fpgamem" << std::endl;
+                    path_info.xd_channels.push_back(*it);
+                    break;
+                }
             }
+            for (std::vector<Channel *>::const_iterator it = dst_node->dma_channels.begin();
+                 it != dst_node->dma_channels.end();
+                 ++it)
+            {
+                if ((*it)->supports_path(dst_fpgamem, dst_mem, serdez_id, 0, 0))
+                {
+                    std::cout << "add dst_fpgamem to dst_mem" << std::endl;
+                    path_info.xd_channels.push_back(*it);
+                    break;
+                }
+            }
+            std::cout << "create special path for compression and decompression" << std::endl;
+        }
+        else
+        {
+            bool ok = find_shortest_path(src_mem, dst_mem, serdez_id, 0 /*redop_id*/, path_info);
+            if (!ok)
+            {
+                log_new_dma.fatal() << "FATAL: no path found from " << src_mem << " to " << dst_mem << " (serdez=" << serdez_id << ")";
+                assert(0);
+            }
+        }
+#else
+        bool ok = find_shortest_path(src_mem, dst_mem, serdez_id, 0 /*redop_id*/, path_info);
+        if (!ok)
+        {
+            log_new_dma.fatal() << "FATAL: no path found from " << src_mem << " to " << dst_mem << " (serdez=" << serdez_id << ")";
+            assert(0);
+        }
+#endif
 	    size_t pathlen = path_info.xd_channels.size();
 	    size_t xd_idx = graph.xd_nodes.size();
 	    size_t ib_idx = graph.ib_edges.size();

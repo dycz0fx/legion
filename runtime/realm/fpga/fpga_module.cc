@@ -7,10 +7,6 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 
-// #define DEFLATE_XCLBIN "/home/xi/Programs/lz77/deflate.xclbin"
-// #define INFLATE_XCLBIN "/home/xi/Programs/lz77/inflate.xclbin"
-// #define DEFAULT_COMP_UNITS 4
-
 namespace Realm
 {
     namespace FPGA
@@ -479,7 +475,8 @@ namespace Realm
         // ---------------------------------------------
         // class FPGADevice
         // ---------------------------------------------
-        FPGADevice::FPGADevice(cl::Device &device, std::string name, std::string xclbin, FPGAWorker *fpga_worker) : name(name), fpga_worker(fpga_worker)
+        FPGADevice::FPGADevice(cl::Device &device, std::string name, std::string xclbin, FPGAWorker *fpga_worker, size_t fpga_coprocessor_num_cu, std::string fpga_coprocessor_kernel)
+            : name(name), fpga_worker(fpga_worker), fpga_coprocessor_num_cu(fpga_coprocessor_num_cu), fpga_coprocessor_kernel(fpga_coprocessor_kernel)
         {
             cl_int err;
             this->device = device;
@@ -550,8 +547,7 @@ namespace Realm
             runtime->add_dma_channel(new FPGAChannel(this, XFER_FPGA_IN_DEV, &runtime->bgwork));
             runtime->add_dma_channel(new FPGAChannel(this, XFER_FPGA_TO_DEV, &runtime->bgwork));
             runtime->add_dma_channel(new FPGAChannel(this, XFER_FPGA_FROM_DEV, &runtime->bgwork));
-            runtime->add_dma_channel(new FPGAChannel(this, XFER_FPGA_TO_DEV_COMP, &runtime->bgwork));
-            runtime->add_dma_channel(new FPGAChannel(this, XFER_FPGA_FROM_DEV_COMP, &runtime->bgwork));
+            runtime->add_dma_channel(new FPGAChannel(this, XFER_FPGA_COMP, &runtime->bgwork));
 
             Machine::MemoryMemoryAffinity mma;
             mma.m1 = fpga_mem->me;
@@ -573,11 +569,6 @@ namespace Realm
         void FPGADevice::create_fpga_mem(RuntimeImpl *runtime, size_t size)
         {
             // TODO: only use membank 0 for now
-            // buff = xclAllocBO(dev_handle, size, 0, cur_fpga_mem_bank);
-            // void *base_ptr_sys = (void *)xclMapBO(dev_handle, bo_handle, true);
-            // struct xclBOProperties bo_prop;
-            // xclGetBOProperties(dev_handle, bo_handle, &bo_prop);
-            // uint64_t base_ptr_dev = bo_prop.paddr;
             cl_int err;
             void *base_ptr_sys = nullptr;
             posix_memalign((void **)&base_ptr_sys, 4096, size);
@@ -592,32 +583,37 @@ namespace Realm
                             << ", base_ptr_sys = " << base_ptr_sys;
         }
 
+        void FPGADevice::create_fpga_ib(RuntimeImpl *runtime, size_t size)
+        {
+            // TODO: only use membank 0 for now
+            cl_int err;
+            void *base_ptr_sys = nullptr;
+            posix_memalign((void **)&base_ptr_sys, 4096, size);
+            OCL_CHECK(err, ib_buff = cl::Buffer(context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, size, base_ptr_sys, &err));
+            Memory m = runtime->next_local_ib_memory_id();
+            IBMemory *ib_mem;
+            ib_mem = new IBMemory(m, size,
+                                  MemoryImpl::MKIND_FPGA, Memory::FPGA_MEM,
+                                  base_ptr_sys, 0);
+            this->fpga_ib = ib_mem;
+            runtime->add_ib_memory(ib_mem);
+            log_fpga.info() << "create_fpga_ib: "
+                            << device.getInfo<CL_DEVICE_NAME>()
+                            << ", size = "
+                            << (size >> 20) << " MB"
+                            << ", base_ptr_sys = " << base_ptr_sys;
+        }
+
         void FPGADevice::create_fpga_queues()
         {
             fpga_queue = new FPGAQueue(this, fpga_worker, command_queue);
         }
 
-        void FPGADevice::copy_to_fpga(off_t dst_offset, const void *src, size_t bytes, FPGACompletionNotification *event)
+        void FPGADevice::copy_to_fpga(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event)
         {
-            void *dst = (void *)((uint8_t *)(fpga_mem->base_ptr_sys) + dst_offset);
-            log_fpga.info() << "copy_to_fpga: src = " << src << " dst_offset = " << dst_offset
-                            << " bytes = " << bytes << " dst = " << (int *)dst << "\n";
-            // fpga_memcpy_2d(reinterpret_cast<uintptr_t>(dst), 0,
-            //                reinterpret_cast<uintptr_t>(src), 0,
-            //                bytes, 1);
-            // cl_int err = 0;
-            // cl_buffer_region buff_copy_info = {(size_t)dst_offset, bytes};
-            // cl::Buffer temp_copy_buff;
-            // OCL_CHECK(err, temp_copy_buff = buff.createSubBuffer(CL_MEM_HOST_WRITE_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &buff_copy_info, nullptr));
-            // OCL_CHECK(err, err = command_queue.enqueueMigrateMemObjects({temp_copy_buff}, 0 /* 0 means from host*/));
-            // OCL_CHECK(err, err = command_queue.finish());
-
-            // OCL_CHECK(err, err = command_queue.enqueueWriteBuffer(buff,        // buffer on the FPGA
-            //                                                       CL_TRUE,     // blocking call
-            //                                                       dst_offset,  // buffer offset in bytes
-            //                                                       bytes,       // Size in bytes
-            //                                                       (void *)src, // Pointer to the data to copy
-            //                                                       nullptr, nullptr));
+            log_fpga.info() << "copy_to_fpga: src = " << src << " dst = " << dst
+                            << " src_offset = " << src_offset << "dst_offset = " << dst_offset
+                            << " bytes = " << bytes << " event = " << event;
 
             FPGADeviceMemcpy *copy = new FPGADeviceMemcpy1D(this,
                                                             dst,
@@ -627,56 +623,20 @@ namespace Realm
                                                             FPGA_MEMCPY_HOST_TO_DEVICE,
                                                             event);
             fpga_queue->add_copy(copy);
-
-            // xclSyncBO(this->dev_handle, this->bo_handle, XCL_BO_SYNC_BO_TO_DEVICE, bytes, dst_offset);
-
-            // printf("copy_to_fpga: ");
-            // for (int i = 0; i < 6000; i++)
-            // {
-            //   if (((char *)fpga_mem->base_ptr_sys)[i] == '\0') {
-            //     printf("_");
-            //   }
-            //   else {
-            //     printf("%c", ((char *)fpga_mem->base_ptr_sys)[i]);
-            //   }
-            // }
-            // printf("\n");
-            // FPGARequest *req = event->req;
-            // XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
-            // XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
-            // in_port->iter->confirm_step();
-            // out_port->iter->confirm_step();
-
-            // event->request_completed();
+            fpga_queue->get_command_queue().finish();
+            printf("after copy_to_fpga\n");
+            for (size_t i = 0; i < bytes / sizeof(int); i++)
+            {
+                printf("%d ", ((int *)src)[i]);
+            }
+            printf("\n");
         }
 
-        void FPGADevice::copy_from_fpga(void *dst, off_t src_offset, size_t bytes, FPGACompletionNotification *event)
+        void FPGADevice::copy_from_fpga(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event)
         {
-            void *src = (void *)((uint8_t *)(fpga_mem->base_ptr_sys) + src_offset);
-            log_fpga.info() << "copy_from_fpga: dst = " << dst << " src_offset = " << src_offset
-                            << " bytes = " << bytes << " src = " << (int *)src << "\n";
-            // xclSyncBO(this->dev_handle, this->bo_handle, XCL_BO_SYNC_BO_FROM_DEVICE, bytes, src_offset);
-            // cl::Event async_event;
-            // command_queue.enqueueReadBuffer(buff,                                                              // buffer on the FPGA
-            //                                 CL_FALSE,                                                                         // blocking call
-            //                                 src_offset,                                                               // buffer offset in bytes
-            //                                 bytes,                                                                      // Size in bytes
-            //                                 (void *)src, // Pointer to the data to copy
-            //                                 nullptr, &async_event);
-            // async_event.wait();
-
-            // cl_int err = 0;
-            // cl_buffer_region buff_copy_info = {(size_t)src_offset, bytes};
-            // cl::Buffer temp_copy_buff;
-            // OCL_CHECK(err, temp_copy_buff = buff.createSubBuffer(CL_MEM_HOST_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &buff_copy_info, nullptr));
-            // OCL_CHECK(err, err = command_queue.enqueueMigrateMemObjects({temp_copy_buff}, CL_MIGRATE_MEM_OBJECT_HOST));
-            // OCL_CHECK(err, err = command_queue.finish());
-            // OCL_CHECK(err, err = command_queue.enqueueReadBuffer(buff,       // buffer on the FPGA
-            //                                                      CL_TRUE,    // blocking call
-            //                                                      src_offset, // buffer offset in bytes
-            //                                                      bytes,      // Size in bytes
-            //                                                      dst,        // Pointer to the data to copy
-            //                                                      nullptr, nullptr));
+            log_fpga.info() << "copy_from_fpga: src = " << src << " dst = " << dst
+                            << " src_offset = " << src_offset << "dst_offset = " << dst_offset
+                            << " bytes = " << bytes << " event = " << event;
 
             FPGADeviceMemcpy *copy = new FPGADeviceMemcpy1D(this,
                                                             dst,
@@ -686,43 +646,13 @@ namespace Realm
                                                             FPGA_MEMCPY_DEVICE_TO_HOST,
                                                             event);
             fpga_queue->add_copy(copy);
-
-            // fpga_memcpy_2d(reinterpret_cast<uintptr_t>(dst), 0,
-            //                reinterpret_cast<uintptr_t>(src), 0,
-            //                bytes, 1);
-            // printf("copy_from_fpga: ");
-            // for (int i = 0; i < 6000; i++)
-            // {
-            //   if (((char *)fpga_mem->base_ptr_sys)[i] == '\0') {
-            //     printf("_");
-            //   }
-            //   else {
-            //     printf("%c", ((char *)fpga_mem->base_ptr_sys)[i]);
-            //   }
-            // }
-            // printf("\n");
-
-            // printf("copy_from_fpga: ");
-            // for (int i = 0; i < 40; i++)
-            // {
-            //     printf("%d ", ((int *)(fpga_mem->base_ptr_sys))[i]);
-            // }
-            // printf("\n");
-            // for (int i = 0; i < 40; i++)
-            // {
-            //     printf("%d-", ((int *)dst)[i]);
-            // }
-            // printf("\n");
-
-            // event->request_completed();
         }
 
-        void FPGADevice::copy_within_fpga(off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event)
+        void FPGADevice::copy_within_fpga(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event)
         {
-            log_fpga.info() << "copy_within_fpga: dst_offset = " << dst_offset << " src_offset = " << src_offset
-                            << " bytes = " << bytes << "\n";
-            void *src = (void *)((uint8_t *)(fpga_mem->base_ptr_sys) + src_offset);
-            void *dst = (void *)((uint8_t *)(fpga_mem->base_ptr_sys) + dst_offset);
+            log_fpga.info() << "copy_within_fpga: src = " << src << " dst = " << dst
+                            << " src_offset = " << src_offset << "dst_offset = " << dst_offset
+                            << " bytes = " << bytes << " event = " << event;
             FPGADeviceMemcpy *copy = new FPGADeviceMemcpy1D(this,
                                                             dst,
                                                             src,
@@ -731,289 +661,122 @@ namespace Realm
                                                             FPGA_MEMCPY_DEVICE_TO_DEVICE,
                                                             event);
             fpga_queue->add_copy(copy);
-
-            // FPGARequest *req = event->req;
-            // XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
-            // XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
-            // in_port->iter->confirm_step();
-            // out_port->iter->confirm_step();
-            // event->request_completed();
         }
 
-        void FPGADevice::copy_to_peer(FPGADevice *dst, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event)
+        void FPGADevice::copy_to_peer(FPGADevice *dst_dev, void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event)
         {
-            log_fpga.info() << "copy_to_peer(not implemented!): dst = " << dst << " dst_offset = " << dst_offset
-                            << " bytes = " << bytes << " event = " << event << "\n";
+            log_fpga.info() << "copy_to_peer(not implemented!): dst_dev = " << dst_dev
+                            << "src = " << src << " dst = " << dst
+                            << " src_offset = " << src_offset << "dst_offset = " << dst_offset
+                            << " bytes = " << bytes << " event = " << event;
             assert(0);
-            // FPGARequest *req = event->req;
-            // XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
-            // XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
-            // in_port->iter->confirm_step();
-            // out_port->iter->confirm_step();
-            // event->request_completed();
-        }
-
-        // decompress data after moving data from ib memory to fpga device memory
-        void FPGADevice::copy_to_fpga_comp(off_t dst_offset, const void *src, size_t bytes, FPGACompletionNotification *event)
-        {
-            // size_t i;
-            size_t dst = reinterpret_cast<size_t>((uint8_t *)(fpga_mem->base_ptr_sys) + dst_offset);
-            int *temp = (int *)dst;
-            log_fpga.info() << "copy_to_fpga_comp: src = " << src << " dst_offset = " << dst_offset
-                            << " bytes = " << bytes << " dst = " << temp << "\n";
-
-            // FPGARequest *req = event->req;
-            // XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
-            // XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
-            // out_port->iter->confirm_step();
-            // in_port->iter->cancel_step();
-            // TransferIterator::AddressInfo src_info;
-            // size_t bytes_avail = in_port->iter->step(bytes,
-            //                                          src_info,
-            //                                          0,
-            //                                          false /*!tentative*/);
-            // log_fpga.info() << "(src_info) base_offset: " << src_info.base_offset
-            //                 << " bytes_per_chunk: " << src_info.bytes_per_chunk
-            //                 << " num_lines: " << src_info.num_lines
-            //                 << " line_stride: " << src_info.line_stride
-            //                 << " num_planes: " << src_info.num_planes
-            //                 << " plane_stride: " << src_info.plane_stride
-            //                 << " bytes_avail: " << bytes_avail;
-
-            // // create a temp BO to store compressed data
-            // xclBufferHandle bo_temp;
-            // bo_temp = xclAllocBO(this->dev_handle, bytes, 0, 1);
-            // char *bo_temp_host;
-            // bo_temp_host = (char *)xclMapBO(this->dev_handle, bo_temp, true);
-            // uint64_t bo_temp_dev;
-            // struct xclBOProperties bo_prop;
-            // xclGetBOProperties(this->dev_handle, bo_temp, &bo_prop);
-            // bo_temp_dev = bo_prop.paddr;
-
-            // fpga_memcpy_2d(reinterpret_cast<uintptr_t>(bo_temp_host), 0,
-            //                reinterpret_cast<uintptr_t>(src), 0,
-            //                bytes, 1);
-            // xclSyncBO(this->dev_handle, bo_temp, XCL_BO_SYNC_BO_TO_DEVICE, bytes, 0);
-
-            // printf("copy_to_fpga_comp before decompression: ");
-            // for (i = 0; i < bytes; i++)
-            // {
-            //   if (bo_temp_host[i] == '\0')
-            //   {
-            //     printf("_");
-            //   }
-            //   else
-            //   {
-            //     printf("%c", bo_temp_host[i]);
-            //   }
-            // }
-            // printf("\n");
-
-            // //load xclbin
-            // int fd = open(INFLATE_XCLBIN, O_RDONLY);
-            // struct stat st;
-            // fstat(fd, &st);
-            // size_t xclbin_size = st.st_size;
-            // struct axlf *xclbin = (struct axlf *)mmap(NULL, xclbin_size, PROT_READ, MAP_PRIVATE, fd, 0);
-            // uuid_t xclbin_uuid;
-            // memcpy(xclbin_uuid, xclbin->m_header.uuid, sizeof(uuid_t));
-            // xclLoadXclBin(this->dev_handle, (const struct axlf *)xclbin);
-            // munmap(xclbin, xclbin_size);
-            // close(fd);
-
-            // size_t num_compute_units = DEFAULT_COMP_UNITS;
-            // for (i = 0; i < num_compute_units; i++)
-            // {
-            //   xclOpenContext(this->dev_handle, xclbin_uuid, (unsigned int)i, true);
-            // }
-
-            // uint64_t p_base_dev = (uint64_t)this->fpga_mem->base_ptr_dev;
-            // uint64_t p_inflate_in = bo_temp_dev;
-            // uint64_t p_inflate_out = p_base_dev + dst_offset;
-            // log_fpga.print("p_inflate_in = %zu p_inflate_out = %zu\n", p_inflate_in, p_inflate_out);
-
-            // xclBufferHandle bo_cmd = xclAllocBO(this->dev_handle, (size_t)CMD_SIZE, 0, XCL_BO_FLAGS_EXECBUF);
-            // struct ert_start_kernel_cmd *start_cmd = (struct ert_start_kernel_cmd *)xclMapBO(this->dev_handle, bo_cmd, true);
-            // memset(start_cmd, 0, CMD_SIZE);
-            // start_cmd->state = ERT_CMD_STATE_NEW;
-            // start_cmd->opcode = ERT_START_CU;
-            // start_cmd->stat_enabled = 1;
-            // start_cmd->count = ARG_INFLATE_OUTPUT_OFFSET / 4 + 3;
-            // start_cmd->cu_mask = (1 << num_compute_units) - 1; /* CU 0, 1, 2 */
-            // start_cmd->data[ARG_INFLATE_INPUT_OFFSET / 4] = p_inflate_in;
-            // start_cmd->data[ARG_INFLATE_INPUT_OFFSET / 4 + 1] = (p_inflate_in >> 32) & 0xFFFFFFFF;
-            // start_cmd->data[ARG_INFLATE_OUTPUT_OFFSET / 4] = p_inflate_out;
-            // start_cmd->data[ARG_INFLATE_OUTPUT_OFFSET / 4 + 1] = (p_inflate_out >> 32) & 0xFFFFFFFF;
-
-            // xclExecBuf(this->dev_handle, bo_cmd);
-            // struct ert_packet *cmd_packet = (struct ert_packet *)start_cmd;
-            // while (cmd_packet->state != ERT_CMD_STATE_COMPLETED)
-            // {
-            //   xclExecWait(this->dev_handle, 1000);
-            // }
-
-            // xclUnmapBO(this->dev_handle, bo_cmd, start_cmd);
-            // xclFreeBO(this->dev_handle, bo_cmd);
-            // for (i = 0; i < num_compute_units; i++)
-            // {
-            //   xclCloseContext(this->dev_handle, xclbin_uuid, (unsigned int)i);
-            // }
-
-            // // copy data from fpga device memory for testing
-            // xclSyncBO(this->dev_handle, this->bo_handle, XCL_BO_SYNC_BO_FROM_DEVICE, bytes, dst_offset);
-
-            // printf("copy_to_fpga_comp: ");
-            // for (i = 0; i < 6000; i++)
-            // {
-            //   if (((char *)fpga_mem->base_ptr_sys)[i] == '\0') {
-            //     printf("_");
-            //   }
-            //   else {
-            //     printf("%c", ((char *)fpga_mem->base_ptr_sys)[i]);
-            //   }
-            // }
-            // printf("\n");
-            // event->request_completed();
         }
 
         // compress data before moving data from fpga device memory to ib memory
-        void FPGADevice::copy_from_fpga_comp(void *dst, off_t src_offset, size_t bytes, FPGACompletionNotification *event)
+        void FPGADevice::comp(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event)
         {
-            // size_t i;
-            size_t src = reinterpret_cast<size_t>((uint8_t *)(fpga_mem->base_ptr_sys) + src_offset);
-            int *temp = (int *)src;
-            log_fpga.info() << "copy_from_fpga_comp: dst = " << dst << " src_offset = " << src_offset
-                            << " bytes = " << bytes << " src = " << temp << "\n";
+            log_fpga.info() << "comp: src = " << src << " dst = " << dst
+                            << " src_offset = " << src_offset << "dst_offset = " << dst_offset
+                            << " bytes = " << bytes << " event = " << event;
+            printf("comp start\n");
+            size_t size = bytes / sizeof(int);
+            for (size_t i = 0; i < size; i++)
+            {
+                printf("%d ", ((int *)src)[i]);
+            }
+            printf("\n");
+            // program device
+            int num_cu = fpga_coprocessor_num_cu;
+            std::vector<cl::Kernel> krnls(num_cu);
+            cl_int err;
+            // Creating Kernel objects
+            for (int i = 0; i < num_cu; i++)
+            {
+                OCL_CHECK(err, krnls[i] = cl::Kernel(program, fpga_coprocessor_kernel.c_str(), &err));
+            }
+            // Creating sub-buffers
+            auto chunk_size = size / num_cu;
+            size_t vector_size_bytes = sizeof(int) * chunk_size;
+            std::vector<cl::Buffer> buffer_in1(num_cu);
+            std::vector<cl::Buffer> buffer_in2(num_cu);
+            std::vector<cl::Buffer> buffer_output(num_cu);
 
-            // // create a temp BO to store compressed data
-            // xclBufferHandle bo_temp;
-            // bo_temp = xclAllocBO(this->dev_handle, bytes, 0, 1);
-            // char *bo_temp_host;
-            // bo_temp_host = (char *)xclMapBO(this->dev_handle, bo_temp, true);
-            // uint64_t bo_temp_dev;
-            // struct xclBOProperties bo_prop;
-            // xclGetBOProperties(this->dev_handle, bo_temp, &bo_prop);
-            // bo_temp_dev = bo_prop.paddr;
+            // I/O data vectors
+            std::vector<int, aligned_allocator<int>> source_in2(bytes, 1);
 
-            // //load xclbin
-            // int fd = open(DEFLATE_XCLBIN, O_RDONLY);
-            // struct stat st;
-            // fstat(fd, &st);
-            // size_t xclbin_size = st.st_size;
-            // struct axlf *xclbin = (struct axlf *)mmap(NULL, xclbin_size, PROT_READ, MAP_PRIVATE, fd, 0);
-            // uuid_t xclbin_uuid;
-            // memcpy(xclbin_uuid, xclbin->m_header.uuid, sizeof(uuid_t));
-            // xclLoadXclBin(this->dev_handle, (const struct axlf *)xclbin);
-            // munmap(xclbin, xclbin_size);
-            // close(fd);
+            for (int i = 0; i < num_cu; i++)
+            {
+                OCL_CHECK(err, buffer_in2[i] = cl::Buffer(context, CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY, vector_size_bytes,
+                                                          source_in2.data() + i * chunk_size, &err));
+            }
+            for (int i = 0; i < num_cu; i++)
+            {
+                cl_buffer_region buffer_in1_info = {src_offset + i * vector_size_bytes, vector_size_bytes};
+                OCL_CHECK(err, buffer_in1[i] = ib_buff.createSubBuffer(CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &buffer_in1_info, &err));
+                cl_buffer_region buffer_output_info = {dst_offset + i * vector_size_bytes, vector_size_bytes};
+                OCL_CHECK(err, buffer_output[i] = ib_buff.createSubBuffer(CL_MEM_WRITE_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &buffer_output_info, &err));
+            }
 
-            // size_t num_compute_units = DEFAULT_COMP_UNITS;
-            // for (i = 0; i < num_compute_units; i++)
-            // {
-            //   xclOpenContext(this->dev_handle, xclbin_uuid, (unsigned int)i, true);
-            // }
+            for (int i = 0; i < num_cu; i++)
+            {
+                int narg = 0;
 
-            // uint64_t p_base_dev = (uint64_t)this->fpga_mem->base_ptr_dev;
-            // uint64_t p_deflate_in = p_base_dev + src_offset;
-            // uint64_t p_deflate_out = bo_temp_dev;
-            // log_fpga.print("p_deflate_in = %lu p_deflate_out = %lu\n", p_deflate_in, p_deflate_out);
+                // Setting kernel arguments
+                OCL_CHECK(err, err = krnls[i].setArg(narg++, buffer_in1[i]));
+                OCL_CHECK(err, err = krnls[i].setArg(narg++, buffer_in2[i]));
+                OCL_CHECK(err, err = krnls[i].setArg(narg++, buffer_output[i]));
+                OCL_CHECK(err, err = krnls[i].setArg(narg++, (int)chunk_size));
+            }
 
-            // xclBufferHandle bo_cmd = xclAllocBO(this->dev_handle, (size_t)CMD_SIZE, 0, XCL_BO_FLAGS_EXECBUF);
-            // struct ert_start_kernel_cmd *start_cmd = (struct ert_start_kernel_cmd *)xclMapBO(this->dev_handle, bo_cmd, true);
-            // memset(start_cmd, 0, CMD_SIZE);
-            // start_cmd->state = ERT_CMD_STATE_NEW;
-            // start_cmd->opcode = ERT_START_CU;
-            // start_cmd->stat_enabled = 1;
-            // start_cmd->count = ARG_DEFLATE_SIZE_OFFSET / 4 + 3;
-            // start_cmd->cu_mask = (1 << num_compute_units) - 1; /* CU 0, 1, 2 */
-            // start_cmd->data[ARG_DEFLATE_INPUT_OFFSET / 4] = p_deflate_in;
-            // start_cmd->data[ARG_DEFLATE_INPUT_OFFSET / 4 + 1] = (p_deflate_in >> 32) & 0xFFFFFFFF;
-            // start_cmd->data[ARG_DEFLATE_OUTPUT_OFFSET / 4] = p_deflate_out;
-            // start_cmd->data[ARG_DEFLATE_OUTPUT_OFFSET / 4 + 1] = (p_deflate_out >> 32) & 0xFFFFFFFF;
-            // start_cmd->data[ARG_DEFLATE_SIZE_OFFSET / 4] = bytes;
-            // start_cmd->data[ARG_DEFLATE_SIZE_OFFSET / 4 + 1] = (bytes >> 32) & 0xFFFFFFFF;
+            cl::Event task_events[num_cu];
+            for (int i = 0; i < num_cu; i++)
+            {
+                // Launch the kernel
+                OCL_CHECK(err, err = command_queue.enqueueTask(krnls[i], nullptr, &task_events[i]));
+            }
+            // OCL_CHECK(err, err = command_queue.finish());
 
-            // xclExecBuf(this->dev_handle, bo_cmd);
-            // struct ert_packet *cmd_packet = (struct ert_packet *)start_cmd;
-            // while (cmd_packet->state != ERT_CMD_STATE_COMPLETED)
-            // {
-            //   xclExecWait(this->dev_handle, 1000);
-            // }
-
-            // xclUnmapBO(this->dev_handle, bo_cmd, start_cmd);
-            // xclFreeBO(this->dev_handle, bo_cmd);
-            // for (i = 0; i < num_compute_units; i++)
-            // {
-            //   xclCloseContext(this->dev_handle, xclbin_uuid, (unsigned int)i);
-            // }
-
-            // xclSyncBO(this->dev_handle, bo_temp, XCL_BO_SYNC_BO_FROM_DEVICE, bytes, 0);
-            // size_t new_bytes = bytes;
-            // while (bo_temp_host[new_bytes] != '\0')
-            // {
-            //   if (bo_temp_host[new_bytes] == '@')
-            //   {
-            //     new_bytes += 4;
-            //   }
-            //   else
-            //   {
-            //     new_bytes++;
-            //   }
-            // }
-            // new_bytes++;
-            // printf("new_bytes = %lu\n", new_bytes);
-
-            // fpga_memcpy_2d(reinterpret_cast<uintptr_t>(dst), 0,
-            //                reinterpret_cast<uintptr_t>(bo_temp_host), 0,
-            //                new_bytes, 1);
-
-            // printf("copy_from_fpga_comp: ");
-            // for (int i = 0; i < 6000; i++)
-            // {
-            //   if (((char *)fpga_mem->base_ptr_sys)[i] == '\0') {
-            //     printf("_");
-            //   }
-            //   else {
-            //     printf("%c", ((char *)fpga_mem->base_ptr_sys)[i]);
-            //   }
-            // }
-            // printf("\n");
-            // FPGARequest *req = event->req;
-            // XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
-            // XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
-            // in_port->iter->confirm_step();
-            // if (new_bytes == bytes)
-            // {
-            //     out_port->iter->confirm_step();
-            // }
-            // else
-            // {
-            //     out_port->iter->cancel_step();
-            //     TransferIterator::AddressInfo dst_info;
-            //     size_t bytes_avail = out_port->iter->step(new_bytes,
-            //                                               dst_info,
-            //                                               0,
-            //                                               false /*!tentative*/);
-            //     assert(bytes_avail == new_bytes);
-            //     out_port->local_bytes_total = new_bytes;
-            //     out_port->local_bytes_cons.store(out_port->local_bytes_total); // completion detection uses this
-            //     req->xd->update_bytes_write(0, req->xd->output_ports[0].local_bytes_total, 0);
-            //     // size_t rewind_dst = bytes - new_bytes;
-            //     // out_port->local_bytes_cons.fetch_sub(rewind_dst);
-            //     // req->xd->update_bytes_write(0, new_bytes, 0);
-            //     req->write_seq_count = out_port->local_bytes_total;
-            //     log_fpga.info() << "(dst_info) base_offset: " << dst_info.base_offset
-            //                     << " bytes_per_chunk: " << dst_info.bytes_per_chunk
-            //                     << " num_lines: " << dst_info.num_lines
-            //                     << " line_stride: " << dst_info.line_stride
-            //                     << " num_planes: " << dst_info.num_planes
-            //                     << " plane_stride: " << dst_info.plane_stride
-            //                     << " local_bytes_total: " << out_port->local_bytes_total
-            //                     << " write_seq_pos: " << req->write_seq_count
-            //                     << " write_seq_count: " << req->write_seq_pos;
-            // }
-            // event->request_completed();
+            std::vector<cl::Event> wait_events[num_cu];
+            // Copy result from device global memory to host local memory
+            for (int i = 0; i < num_cu; i++)
+            {
+                wait_events[i].push_back(task_events[i]);
+                OCL_CHECK(err, err = command_queue.enqueueMigrateMemObjects({buffer_output[i]}, CL_MIGRATE_MEM_OBJECT_HOST, &wait_events[i], nullptr));
+            }
+            OCL_CHECK(err, err = command_queue.finish());
+            // OCL_CHECK(err, err = command_queue.flush());
+            log_fpga.info() << "coprocessor kernels finished";
+            // FPGADeviceMemcpy *copy = new FPGADeviceMemcpy1D(this,
+            //                                                 dst,
+            //                                                 src,
+            //                                                 bytes,
+            //                                                 dst_offset,
+            //                                                 FPGA_MEMCPY_DEVICE_TO_DEVICE,
+            //                                                 event);
+            // fpga_queue->add_copy(copy);
+            event->request_completed();
         }
+
+        bool FPGADevice::is_in_buff(void *ptr)
+        {
+            uint64_t base_ptr = (uint64_t)(fpga_mem->base_ptr_sys);
+            if ((uint64_t)ptr >= base_ptr && (uint64_t)ptr <= base_ptr + fpga_mem->size)
+            {
+                return true;
+            }
+            return false;
+        }
+        
+        bool FPGADevice::is_in_ib_buff(void *ptr)
+        {
+            uint64_t base_ptr = (uint64_t)(fpga_ib->get_direct_ptr(0, 0));
+            if ((uint64_t)ptr >= base_ptr && (uint64_t)ptr <= base_ptr + fpga_ib->size)
+            {
+                return true;
+            }
+            return false;
+        }
+
 
         //-----------------------------------------------
         // Device Memory Copy Operations
@@ -1053,31 +816,44 @@ namespace Realm
             size_t size = span_bytes;
             cl_int err = 0;
             log_fpga.debug() << "do_span: buff_offset " << buff_offset << " size " << size << " srcptr " << srcptr << " dstptr " << dstptr;
+            cl::Buffer *temp_buff = nullptr;
             if (kind == FPGA_MEMCPY_HOST_TO_DEVICE)
             {
-                OCL_CHECK(err, err = fpga_queue->get_command_queue().enqueueWriteBuffer(fpga_device->buff, // buffer on the FPGA
-                                                                                        CL_FALSE,          // blocking call
-                                                                                        buff_offset,       // buffer offset in bytes
-                                                                                        size,              // Size in bytes
-                                                                                        (void *)srcptr,    // Pointer to the data to copy
+                if (fpga_device->is_in_ib_buff(dstptr))
+                    temp_buff = &(fpga_device->ib_buff);
+                else
+                    temp_buff = &(fpga_device->buff);
+                OCL_CHECK(err, err = fpga_queue->get_command_queue().enqueueWriteBuffer(*temp_buff,     // buffer on the FPGA
+                                                                                        CL_FALSE,       // blocking call
+                                                                                        buff_offset,    // buffer offset in bytes
+                                                                                        size,           // Size in bytes
+                                                                                        (void *)srcptr, // Pointer to the data to copy
                                                                                         nullptr, nullptr));
             }
             else if (kind == FPGA_MEMCPY_DEVICE_TO_HOST)
             {
-                OCL_CHECK(err, err = fpga_queue->get_command_queue().enqueueReadBuffer(fpga_device->buff, // buffer on the FPGA
-                                                                                       CL_FALSE,          // blocking call
-                                                                                       buff_offset,       // buffer offset in bytes
-                                                                                       size,              // Size in bytes
-                                                                                       (void *)dstptr,    // Pointer to the data to copy
+                if (fpga_device->is_in_ib_buff(srcptr))
+                    temp_buff = &(fpga_device->ib_buff);
+                else
+                    temp_buff = &(fpga_device->buff);
+                OCL_CHECK(err, err = fpga_queue->get_command_queue().enqueueReadBuffer(*temp_buff,     // buffer on the FPGA
+                                                                                       CL_FALSE,       // blocking call
+                                                                                       buff_offset,    // buffer offset in bytes
+                                                                                       size,           // Size in bytes
+                                                                                       (void *)dstptr, // Pointer to the data to copy
                                                                                        nullptr, nullptr));
             }
             else if (kind == FPGA_MEMCPY_DEVICE_TO_DEVICE)
             {
-                OCL_CHECK(err, err = fpga_queue->get_command_queue().enqueueWriteBuffer(fpga_device->buff, // buffer on the FPGA
-                                                                                        CL_FALSE,          // blocking call
-                                                                                        buff_offset,       // buffer offset in bytes
-                                                                                        size,              // Size in bytes
-                                                                                        (void *)srcptr,    // Pointer to the data to copy
+                if (fpga_device->is_in_ib_buff(dstptr))
+                    temp_buff = &(fpga_device->ib_buff);
+                else
+                    temp_buff = &(fpga_device->buff);
+                OCL_CHECK(err, err = fpga_queue->get_command_queue().enqueueWriteBuffer(*temp_buff,     // buffer on the FPGA
+                                                                                        CL_FALSE,       // blocking call
+                                                                                        buff_offset,    // buffer offset in bytes
+                                                                                        size,           // Size in bytes
+                                                                                        (void *)srcptr, // Pointer to the data to copy
                                                                                         nullptr, nullptr));
             }
             else if (kind == FPGA_MEMCPY_PEER_TO_PEER)
@@ -1110,13 +886,17 @@ namespace Realm
                           dst, src, elmt_size, kind);
         }
 
-        FPGAModule::FPGAModule() : Module("fpga"), cfg_num_fpgas(0), cfg_use_worker_threads(false), cfg_use_shared_worker(true), cfg_fpga_mem_size(4 << 20)
+        FPGAModule::FPGAModule()
+            : Module("fpga"), cfg_num_fpgas(0), cfg_use_worker_threads(false),
+              cfg_use_shared_worker(true), cfg_fpga_mem_size(4 << 20), cfg_fpga_ib_size(4 << 20),
+              cfg_fpga_coprocessor_num_cu(1)
         {
             shared_worker = nullptr;
             cfg_fpga_xclbin = "";
             fpga_devices.clear();
             dedicated_workers.clear();
             fpga_procs_.clear();
+            cfg_fpga_coprocessor_kernel = "";
         }
 
         FPGAModule::~FPGAModule(void)
@@ -1143,7 +923,10 @@ namespace Realm
                 cp.add_option_bool("-ll:fpga_work_thread", m->cfg_use_worker_threads);
                 cp.add_option_bool("-ll:fpga_shared_worker", m->cfg_use_shared_worker);
                 cp.add_option_int_units("-ll:fpga_size", m->cfg_fpga_mem_size, 'm');
+                cp.add_option_int_units("-ll:fpga_ib_size", m->cfg_fpga_ib_size, 'm');
                 cp.add_option_string("-ll:fpga_xclbin", m->cfg_fpga_xclbin);
+                cp.add_option_int("-ll:fpga_coprocessor_num_cu", m->cfg_fpga_coprocessor_num_cu);
+                cp.add_option_string("-ll:fpga_coprocessor_kernel", m->cfg_fpga_coprocessor_kernel);
 
                 bool ok = cp.parse_command_line(cmdline);
                 if (!ok)
@@ -1203,7 +986,7 @@ namespace Realm
                         worker->add_to_manager(&(runtime->bgwork));
                 }
 
-                FPGADevice *fpga_device = new FPGADevice(devices[i], "fpga" + std::to_string(i), cfg_fpga_xclbin, worker);
+                FPGADevice *fpga_device = new FPGADevice(devices[i], "fpga" + std::to_string(i), cfg_fpga_xclbin, worker, cfg_fpga_coprocessor_num_cu, cfg_fpga_coprocessor_kernel);
                 fpga_devices.push_back(fpga_device);
 
                 if (!cfg_use_shared_worker)
@@ -1225,6 +1008,13 @@ namespace Realm
                 for (size_t i = 0; i < cfg_num_fpgas; i++)
                 {
                     fpga_devices[i]->create_fpga_mem(runtime, cfg_fpga_mem_size);
+                }
+            }
+            if (cfg_fpga_ib_size > 0)
+            {
+                for (size_t i = 0; i < cfg_num_fpgas; i++)
+                {
+                    fpga_devices[i]->create_fpga_ib(runtime, cfg_fpga_ib_size);
                 }
             }
         }
@@ -1438,17 +1228,22 @@ namespace Realm
             }
         }
 
-        void FPGADeviceMemory::get_bytes(off_t offset, void *dst, size_t size)
+        void FPGADeviceMemory::get_bytes(off_t src_offset, void *dst, size_t size)
         {
+
             FPGACompletionEvent n; // TODO: fix me
-            get_device()->copy_from_fpga(dst, offset, size, &n);
+            void *src = (void *)((uint8_t *)(base_ptr_sys) + src_offset);
+            off_t dst_offset = (uint8_t *)dst - (uint8_t *)(base_ptr_sys);
+            get_device()->copy_from_fpga(dst, src, dst_offset, src_offset, size, &n);
             n.request_completed();
         }
 
-        void FPGADeviceMemory::put_bytes(off_t offset, const void *src, size_t size)
+        void FPGADeviceMemory::put_bytes(off_t dst_offset, const void *src, size_t size)
         {
             FPGACompletionEvent n; // TODO: fix me
-            get_device()->copy_to_fpga(offset, src, size, &n);
+            void *dst = (void *)((uint8_t *)(base_ptr_sys) + dst_offset);
+            off_t src_offset = (uint8_t *)src - (uint8_t *)(base_ptr_sys);
+            get_device()->copy_to_fpga(dst, src, dst_offset, src_offset, size, &n);
             n.request_completed();
         }
 
@@ -1460,10 +1255,10 @@ namespace Realm
         void FPGACompletionEvent::request_completed(void)
         {
             log_fpga.info() << "in request_completed " << req;
-            XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
-            XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
-            in_port->iter->confirm_step();
-            out_port->iter->confirm_step();
+            // XferDes::XferPort *in_port = &req->xd->input_ports[req->src_port_idx];
+            // XferDes::XferPort *out_port = &req->xd->output_ports[req->dst_port_idx];
+            // in_port->iter->confirm_step();
+            // out_port->iter->confirm_step();
 
             req->xd->notify_request_read_done(req);
             req->xd->notify_request_write_done(req);
@@ -1478,28 +1273,28 @@ namespace Realm
                       inputs_info, outputs_info,
                       _priority, 0, 0)
         {
-            // if ((inputs_info.size() >= 1) &&
-            //     (input_ports[0].mem->kind == MemoryImpl::MKIND_FPGA))
-            // {
-            //   // all input ports should agree on which fpga they target
-            //   src_fpga = ((FPGADeviceMemory *)(input_ports[0].mem))->device;
-            //   for (size_t i = 1; i < input_ports.size(); i++)
-            //   {
-            //     // exception: control and indirect ports should be readable from cpu
-            //     if ((int(i) == input_control.control_port_idx) ||
-            //         (int(i) == output_control.control_port_idx) ||
-            //         input_ports[i].is_indirect_port)
-            //     {
-            //       assert((input_ports[i].mem->kind == MemoryImpl::MKIND_SYSMEM));
-            //       continue;
-            //     }
-            //     assert(input_ports[i].mem == input_ports[0].mem);
-            //   }
-            // }
-            // else
-            // {
-            //   src_fpga = 0;
-            // }
+            if ((inputs_info.size() >= 1) &&
+                (input_ports[0].mem->kind == MemoryImpl::MKIND_FPGA))
+            {
+                // all input ports should agree on which fpga they target
+                src_fpga = ((FPGADeviceMemory *)(input_ports[0].mem))->device;
+                for (size_t i = 1; i < input_ports.size(); i++)
+                {
+                    // exception: control and indirect ports should be readable from cpu
+                    if ((int(i) == input_control.control_port_idx) ||
+                        (int(i) == output_control.control_port_idx) ||
+                        input_ports[i].is_indirect_port)
+                    {
+                        assert((input_ports[i].mem->kind == MemoryImpl::MKIND_SYSMEM));
+                        continue;
+                    }
+                    assert(input_ports[i].mem == input_ports[0].mem);
+                }
+            }
+            else
+            {
+                src_fpga = 0;
+            }
 
             if ((outputs_info.size() >= 1) &&
                 (output_ports[0].mem->kind == MemoryImpl::MKIND_FPGA))
@@ -1524,44 +1319,6 @@ namespace Realm
                 if (output_ports[i].peer_guid != XFERDES_NO_GUID)
                     multihop_copy = true;
 
-            // if (src_fpga != 0)
-            // {
-            //   if (dst_fpga != 0)
-            //   {
-            //     if (src_fpga == dst_fpga)
-            //     {
-            //       kind = XFER_FPGA_IN_DEV;
-            //       // ignore max_req_size value passed in - it's probably too small
-            //       max_req_size = 1 << 30;
-            //     }
-            //     else
-            //     {
-            //       kind = XFER_FPGA_PEER_DEV;
-            //       // ignore max_req_size value passed in - it's probably too small
-            //       max_req_size = 256 << 20;
-            //     }
-            //   }
-            //   else
-            //   {
-            //     kind = XFER_FPGA_FROM_DEV;
-            //     if (multihop_copy)
-            //       max_req_size = 4 << 20;
-            //   }
-            // }
-            // else
-            // {
-            //   if (dst_fpga != 0)
-            //   {
-            //     kind = XFER_FPGA_TO_DEV;
-            //     if (multihop_copy)
-            //       max_req_size = 4 << 20;
-            //   }
-            //   else
-            //   {
-            //     assert(0);
-            //   }
-            // }
-
             log_fpga.info() << "create FPGAXferDes " << kind;
             this->kind = kind;
             switch (kind)
@@ -1580,11 +1337,7 @@ namespace Realm
             case XFER_FPGA_PEER_DEV:
                 max_req_size = 256 << 20;
                 break;
-            case XFER_FPGA_TO_DEV_COMP:
-                if (multihop_copy)
-                    max_req_size = 4 << 20;
-                break;
-            case XFER_FPGA_FROM_DEV_COMP:
+            case XFER_FPGA_COMP:
                 if (multihop_copy)
                     max_req_size = 4 << 20;
                 break;
@@ -1601,941 +1354,6 @@ namespace Realm
             }
         }
 
-        // copied from long XferDes::default_get_requests
-        long FPGAXferDes::default_get_requests_tentative(Request **reqs, long nr,
-                                                         unsigned flags)
-        {
-            long idx = 0;
-
-            while ((idx < nr) && request_available())
-            {
-                // TODO: we really shouldn't even be trying if the iteration
-                //   is already done
-                if (iteration_completed.load())
-                    break;
-
-                // pull control information if we need it
-                if (input_control.remaining_count == 0)
-                {
-                    XferPort &icp = input_ports[input_control.control_port_idx];
-                    size_t avail = icp.seq_remote.span_exists(icp.local_bytes_total,
-                                                              4 * sizeof(unsigned));
-                    size_t old_lbt = icp.local_bytes_total;
-
-                    // may take a few chunks of data to get a control packet
-                    bool got_packet = false;
-                    do
-                    {
-                        if (avail < sizeof(unsigned))
-                            break; // no data right now
-
-                        TransferIterator::AddressInfo c_info;
-                        size_t amt = icp.iter->step(sizeof(unsigned), c_info, 0,
-                                                    false /*!tentative*/);
-                        assert(amt == sizeof(unsigned));
-                        const void *srcptr = icp.mem->get_direct_ptr(c_info.base_offset, amt);
-                        assert(srcptr != 0);
-                        unsigned cword;
-                        memcpy(&cword, srcptr, sizeof(unsigned));
-
-                        icp.local_bytes_total += sizeof(unsigned);
-                        avail -= sizeof(unsigned);
-
-                        got_packet = input_control.decoder.decode(cword,
-                                                                  input_control.remaining_count,
-                                                                  input_control.current_io_port,
-                                                                  input_control.eos_received);
-                    } while (!got_packet);
-
-                    // can't make further progress if we didn't get a full packet
-                    if (!got_packet)
-                        break;
-
-                    update_bytes_read(input_control.control_port_idx,
-                                      old_lbt, icp.local_bytes_total - old_lbt);
-
-                    log_fpga.info() << "input control: xd=" << std::hex << guid << std::dec
-                                    << " port=" << input_control.current_io_port
-                                    << " count=" << input_control.remaining_count
-                                    << " done=" << input_control.eos_received;
-                    // if count is still zero, we're done
-                    if (input_control.remaining_count == 0)
-                    {
-                        assert(input_control.eos_received);
-                        iteration_completed.store_release(true);
-                        break;
-                    }
-                }
-                if (output_control.remaining_count == 0)
-                {
-                    // this looks wrong, but the port that controls the output is
-                    //  an input port! vvv
-                    XferPort &ocp = input_ports[output_control.control_port_idx];
-                    size_t avail = ocp.seq_remote.span_exists(ocp.local_bytes_total,
-                                                              4 * sizeof(unsigned));
-                    size_t old_lbt = ocp.local_bytes_total;
-
-                    // may take a few chunks of data to get a control packet
-                    bool got_packet = false;
-                    do
-                    {
-                        if (avail < sizeof(unsigned))
-                            break; // no data right now
-
-                        TransferIterator::AddressInfo c_info;
-                        size_t amt = ocp.iter->step(sizeof(unsigned), c_info, 0, false /*!tentative*/);
-                        assert(amt == sizeof(unsigned));
-                        const void *srcptr = ocp.mem->get_direct_ptr(c_info.base_offset, amt);
-                        assert(srcptr != 0);
-                        unsigned cword;
-                        memcpy(&cword, srcptr, sizeof(unsigned));
-
-                        ocp.local_bytes_total += sizeof(unsigned);
-                        avail -= sizeof(unsigned);
-
-                        got_packet = output_control.decoder.decode(cword,
-                                                                   output_control.remaining_count,
-                                                                   output_control.current_io_port,
-                                                                   output_control.eos_received);
-                    } while (!got_packet);
-
-                    // can't make further progress if we didn't get a full packet
-                    if (!got_packet)
-                        break;
-
-                    update_bytes_read(output_control.control_port_idx,
-                                      old_lbt, ocp.local_bytes_total - old_lbt);
-
-                    log_fpga.info() << "output control: xd=" << std::hex << guid << std::dec
-                                    << " port=" << output_control.current_io_port
-                                    << " count=" << output_control.remaining_count
-                                    << " done=" << output_control.eos_received;
-                    // if count is still zero, we're done
-                    if (output_control.remaining_count == 0)
-                    {
-                        assert(output_control.eos_received);
-                        iteration_completed.store_release(true);
-                        // give all output channels a chance to indicate completion
-                        for (size_t i = 0; i < output_ports.size(); i++)
-                            update_bytes_write(i, output_ports[i].local_bytes_total, 0);
-                        break;
-                    }
-                }
-
-                XferPort *in_port = ((input_control.current_io_port >= 0) ? &input_ports[input_control.current_io_port] : 0);
-                XferPort *out_port = ((output_control.current_io_port >= 0) ? &output_ports[output_control.current_io_port] : 0);
-                if (in_port->mem->kind == Realm::MemoryImpl::MKIND_FPGA)
-                {
-                    printf("from FPGA\n");
-                }
-                else if (out_port->mem->kind == Realm::MemoryImpl::MKIND_FPGA)
-                {
-                    printf("to FPGA\n");
-                }
-                // special cases for OOR scatter/gather
-                if (!in_port)
-                {
-                    if (!out_port)
-                    {
-                        // no input or output?  just skip the count?
-                        assert(0);
-                    }
-                    else
-                    {
-                        // no valid input, so no write to the destination -
-                        //  just step the output transfer iterator if it's a real target
-                        //  but barf if it's an IB
-                        assert((out_port->peer_guid == XferDes::XFERDES_NO_GUID) &&
-                               !out_port->serdez_op);
-                        TransferIterator::AddressInfo dummy;
-                        size_t skip_bytes = out_port->iter->step(std::min(input_control.remaining_count,
-                                                                          output_control.remaining_count),
-                                                                 dummy,
-                                                                 flags & TransferIterator::DST_FLAGMASK,
-                                                                 false /*!tentative*/);
-                        log_fpga.debug() << "skipping " << skip_bytes << " bytes of output";
-                        assert(skip_bytes > 0);
-                        input_control.remaining_count -= skip_bytes;
-                        output_control.remaining_count -= skip_bytes;
-                        // TODO: pull this code out to a common place?
-                        if (((input_control.remaining_count == 0) && input_control.eos_received) ||
-                            ((output_control.remaining_count == 0) && output_control.eos_received))
-                        {
-                            log_fpga.info() << "iteration completed via control port: xd=" << std::hex << guid << std::dec;
-                            iteration_completed.store_release(true);
-                            // give all output channels a chance to indicate completion
-                            for (size_t i = 0; i < output_ports.size(); i++)
-                                update_bytes_write(i, output_ports[i].local_bytes_total, 0);
-                            break;
-                        }
-                        continue; // try again
-                    }
-                }
-                else if (!out_port)
-                {
-                    // valid input that we need to throw away
-                    assert(!in_port->serdez_op);
-                    TransferIterator::AddressInfo dummy;
-                    // although we're not reading the IB input data ourselves, we need
-                    //  to wait until it's ready before not-reading it to avoid WAW
-                    //  races on the producer side
-                    size_t skip_bytes = std::min(input_control.remaining_count,
-                                                 output_control.remaining_count);
-                    if (in_port->peer_guid != XferDes::XFERDES_NO_GUID)
-                    {
-                        skip_bytes = in_port->seq_remote.span_exists(in_port->local_bytes_total,
-                                                                     skip_bytes);
-                        if (skip_bytes == 0)
-                            break;
-                    }
-                    skip_bytes = in_port->iter->step(skip_bytes,
-                                                     dummy,
-                                                     flags & TransferIterator::SRC_FLAGMASK,
-                                                     false /*!tentative*/);
-                    log_fpga.debug() << "skipping " << skip_bytes << " bytes of input";
-                    assert(skip_bytes > 0);
-                    update_bytes_read(input_control.current_io_port,
-                                      in_port->local_bytes_total,
-                                      skip_bytes);
-                    in_port->local_bytes_total += skip_bytes;
-                    input_control.remaining_count -= skip_bytes;
-                    output_control.remaining_count -= skip_bytes;
-                    // TODO: pull this code out to a common place?
-                    if (((input_control.remaining_count == 0) && input_control.eos_received) ||
-                        ((output_control.remaining_count == 0) && output_control.eos_received))
-                    {
-                        log_fpga.info() << "iteration completed via control port: xd=" << std::hex << guid << std::dec;
-                        iteration_completed.store_release(true);
-                        // give all output channels a chance to indicate completion
-                        for (size_t i = 0; i < output_ports.size(); i++)
-                            update_bytes_write(i, output_ports[i].local_bytes_total, 0);
-                        break;
-                    }
-                    continue; // try again
-                }
-
-                // there are several variables that can change asynchronously to
-                //  the logic here:
-                //   pre_bytes_total - the max bytes we'll ever see from the input IB
-                //   read_bytes_cons - conservative estimate of bytes we've read
-                //   write_bytes_cons - conservative estimate of bytes we've written
-                //
-                // to avoid all sorts of weird race conditions, sample all three here
-                //  and only use them in the code below (exception: atomic increments
-                //  of rbc or wbc, for which we adjust the snapshot by the same)
-                size_t pbt_snapshot = in_port->remote_bytes_total.load_acquire();
-                size_t rbc_snapshot = in_port->local_bytes_cons.load_acquire();
-                size_t wbc_snapshot = out_port->local_bytes_cons.load_acquire();
-
-                // normally we detect the end of a transfer after initiating a
-                //  request, but empty iterators and filtered streams can cause us
-                //  to not realize the transfer is done until we are asking for
-                //  the next request (i.e. now)
-                if ((in_port->peer_guid == XFERDES_NO_GUID) ? in_port->iter->done() : (in_port->local_bytes_total == pbt_snapshot))
-                {
-                    if (in_port->local_bytes_total == 0)
-                        log_fpga.info() << "empty xferdes: " << guid;
-                        // TODO: figure out how to eliminate false positives from these
-                        //  checks with indirection and/or multiple remote inputs
-#if 0
-	    assert((out_port->peer_guid != XFERDES_NO_GUID) ||
-		   out_port->iter->done());
-#endif
-
-                    iteration_completed.store_release(true);
-
-                    // give all output channels a chance to indicate completion
-                    for (size_t i = 0; i < output_ports.size(); i++)
-                        update_bytes_write(i, output_ports[i].local_bytes_total, 0);
-                    break;
-                }
-
-                TransferIterator::AddressInfo src_info, dst_info;
-                size_t read_bytes, write_bytes, read_seq, write_seq;
-                size_t write_pad_bytes = 0;
-                size_t read_pad_bytes = 0;
-
-                // handle serialization-only and deserialization-only cases
-                //  specially, because they have uncertainty in how much data
-                //  they write or read
-                if (in_port->serdez_op && !out_port->serdez_op)
-                {
-                    // serialization only - must be into an IB
-                    assert(in_port->peer_guid == XFERDES_NO_GUID);
-                    assert(out_port->peer_guid != XFERDES_NO_GUID);
-
-                    // when serializing, we don't know how much output space we're
-                    //  going to consume, so do not step the dst_iter here
-                    // instead, see what we can get from the source and conservatively
-                    //  check flow control on the destination and let the stepping
-                    //  of dst_iter happen in the actual execution of the request
-
-                    // if we don't have space to write a single worst-case
-                    //  element, try again later
-                    if (out_port->seq_remote.span_exists(wbc_snapshot,
-                                                         in_port->serdez_op->max_serialized_size) <
-                        in_port->serdez_op->max_serialized_size)
-                        break;
-
-                    size_t max_bytes = max_req_size;
-
-                    size_t src_bytes = in_port->iter->step(max_bytes, src_info,
-                                                           flags & TransferIterator::SRC_FLAGMASK,
-                                                           true /*tentative*/);
-
-                    size_t num_elems = src_bytes / in_port->serdez_op->sizeof_field_type;
-                    // no input data?  try again later
-                    if (num_elems == 0)
-                        break;
-                    assert((num_elems * in_port->serdez_op->sizeof_field_type) == src_bytes);
-                    size_t max_dst_bytes = num_elems * in_port->serdez_op->max_serialized_size;
-
-                    // if we have an output control, restrict the max number of
-                    //  elements
-                    if (output_control.control_port_idx >= 0)
-                    {
-                        if (num_elems > output_control.remaining_count)
-                        {
-                            log_fpga.info() << "scatter/serialize clamp: " << num_elems << " -> " << output_control.remaining_count;
-                            num_elems = output_control.remaining_count;
-                        }
-                    }
-
-                    size_t clamp_dst_bytes = num_elems * in_port->serdez_op->max_serialized_size;
-                    // test for space using our conserative bytes written count
-                    size_t dst_bytes_avail = out_port->seq_remote.span_exists(wbc_snapshot,
-                                                                              clamp_dst_bytes);
-
-                    if (dst_bytes_avail == max_dst_bytes)
-                    {
-                        // enough space - confirm the source step
-                        in_port->iter->confirm_step();
-                    }
-                    else
-                    {
-                        // not enough space - figure out how many elements we can
-                        //  actually take and adjust the source step
-                        size_t act_elems = dst_bytes_avail / in_port->serdez_op->max_serialized_size;
-                        // if there was a remainder in the division, get rid of it
-                        dst_bytes_avail = act_elems * in_port->serdez_op->max_serialized_size;
-                        size_t new_src_bytes = act_elems * in_port->serdez_op->sizeof_field_type;
-                        in_port->iter->cancel_step();
-                        src_bytes = in_port->iter->step(new_src_bytes, src_info,
-                                                        flags & TransferIterator::SRC_FLAGMASK,
-                                                        false /*!tentative*/);
-                        // this can come up shorter than we expect if the source
-                        //  iterator is 2-D or 3-D - if that happens, re-adjust the
-                        //  dest bytes again
-                        if (src_bytes < new_src_bytes)
-                        {
-                            if (src_bytes == 0)
-                                break;
-
-                            num_elems = src_bytes / in_port->serdez_op->sizeof_field_type;
-                            assert((num_elems * in_port->serdez_op->sizeof_field_type) == src_bytes);
-
-                            // no need to recheck seq_next_read
-                            dst_bytes_avail = num_elems * in_port->serdez_op->max_serialized_size;
-                        }
-                    }
-
-                    // since the dst_iter will be stepped later, the dst_info is a
-                    //  don't care, so copy the source so that lines/planes/etc match
-                    //  up
-                    dst_info = src_info;
-
-                    read_seq = in_port->local_bytes_total;
-                    read_bytes = src_bytes;
-                    in_port->local_bytes_total += src_bytes;
-
-                    write_seq = 0; // filled in later
-                    write_bytes = dst_bytes_avail;
-                    out_port->local_bytes_cons.fetch_add(dst_bytes_avail);
-                    wbc_snapshot += dst_bytes_avail;
-                }
-                else if (!in_port->serdez_op && out_port->serdez_op)
-                {
-                    // deserialization only - must be from an IB
-                    assert(in_port->peer_guid != XFERDES_NO_GUID);
-                    assert(out_port->peer_guid == XFERDES_NO_GUID);
-
-                    // when deserializing, we don't know how much input data we need
-                    //  for each element, so do not step the src_iter here
-                    //  instead, see what the destination wants
-                    // if the transfer is still in progress (i.e. pre_bytes_total
-                    //  hasn't been set), we have to be conservative about how many
-                    //  elements we can get from partial data
-
-                    // input data is done only if we know the limit AND we have all
-                    //  the remaining bytes (if any) up to that limit
-                    bool input_data_done = ((pbt_snapshot != size_t(-1)) &&
-                                            ((rbc_snapshot >= pbt_snapshot) ||
-                                             (in_port->seq_remote.span_exists(rbc_snapshot,
-                                                                              pbt_snapshot - rbc_snapshot) ==
-                                              (pbt_snapshot - rbc_snapshot))));
-                    // if we're using an input control and it's not at the end of the
-                    //  stream, the above checks may not be precise
-                    if ((input_control.control_port_idx >= 0) &&
-                        !input_control.eos_received)
-                        input_data_done = false;
-
-                    // this done-ness overrides many checks based on the conservative
-                    //  out_port->serdez_op->max_serialized_size
-                    if (!input_data_done)
-                    {
-                        // if we don't have enough input data for a single worst-case
-                        //  element, try again later
-                        if ((in_port->seq_remote.span_exists(rbc_snapshot,
-                                                             out_port->serdez_op->max_serialized_size) <
-                             out_port->serdez_op->max_serialized_size))
-                        {
-                            break;
-                        }
-                    }
-
-                    size_t max_bytes = max_req_size;
-
-                    size_t dst_bytes = out_port->iter->step(max_bytes, dst_info,
-                                                            flags & TransferIterator::DST_FLAGMASK,
-                                                            !input_data_done);
-
-                    size_t num_elems = dst_bytes / out_port->serdez_op->sizeof_field_type;
-                    if (num_elems == 0)
-                        break;
-                    assert((num_elems * out_port->serdez_op->sizeof_field_type) == dst_bytes);
-                    size_t max_src_bytes = num_elems * out_port->serdez_op->max_serialized_size;
-                    // if we have an input control, restrict the max number of
-                    //  elements
-                    if (input_control.control_port_idx >= 0)
-                    {
-                        if (num_elems > input_control.remaining_count)
-                        {
-                            log_fpga.info() << "gather/deserialize clamp: " << num_elems << " -> " << input_control.remaining_count;
-                            num_elems = input_control.remaining_count;
-                        }
-                    }
-
-                    size_t clamp_src_bytes = num_elems * out_port->serdez_op->max_serialized_size;
-                    size_t src_bytes_avail;
-                    if (input_data_done)
-                    {
-                        // we're certainty to have all the remaining data, so keep
-                        //  the limit at max_src_bytes - we won't actually overshoot
-                        //  (unless the serialized data is corrupted)
-                        src_bytes_avail = max_src_bytes;
-                    }
-                    else
-                    {
-                        // test for space using our conserative bytes read count
-                        src_bytes_avail = in_port->seq_remote.span_exists(rbc_snapshot,
-                                                                          clamp_src_bytes);
-
-                        if (src_bytes_avail == max_src_bytes)
-                        {
-                            // enough space - confirm the dest step
-                            out_port->iter->confirm_step();
-                        }
-                        else
-                        {
-                            log_fpga.info() << "pred limits deserialize: " << max_src_bytes << " -> " << src_bytes_avail;
-                            // not enough space - figure out how many elements we can
-                            //  actually read and adjust the dest step
-                            size_t act_elems = src_bytes_avail / out_port->serdez_op->max_serialized_size;
-                            // if there was a remainder in the division, get rid of it
-                            src_bytes_avail = act_elems * out_port->serdez_op->max_serialized_size;
-                            size_t new_dst_bytes = act_elems * out_port->serdez_op->sizeof_field_type;
-                            out_port->iter->cancel_step();
-                            dst_bytes = out_port->iter->step(new_dst_bytes, dst_info,
-                                                             flags & TransferIterator::SRC_FLAGMASK,
-                                                             false /*!tentative*/);
-                            // this can come up shorter than we expect if the destination
-                            //  iterator is 2-D or 3-D - if that happens, re-adjust the
-                            //  source bytes again
-                            if (dst_bytes < new_dst_bytes)
-                            {
-                                if (dst_bytes == 0)
-                                    break;
-
-                                num_elems = dst_bytes / out_port->serdez_op->sizeof_field_type;
-                                assert((num_elems * out_port->serdez_op->sizeof_field_type) == dst_bytes);
-
-                                // no need to recheck seq_pre_write
-                                src_bytes_avail = num_elems * out_port->serdez_op->max_serialized_size;
-                            }
-                        }
-                    }
-
-                    // since the src_iter will be stepped later, the src_info is a
-                    //  don't care, so copy the source so that lines/planes/etc match
-                    //  up
-                    src_info = dst_info;
-
-                    read_seq = 0; // filled in later
-                    read_bytes = src_bytes_avail;
-                    in_port->local_bytes_cons.fetch_add(src_bytes_avail);
-                    rbc_snapshot += src_bytes_avail;
-
-                    write_seq = out_port->local_bytes_total;
-                    write_bytes = dst_bytes;
-                    out_port->local_bytes_total += dst_bytes;
-                    out_port->local_bytes_cons.store(out_port->local_bytes_total); // completion detection uses this
-                }
-                else
-                {
-                    // either no serialization or simultaneous serdez
-
-                    // limit transfer based on the max request size, or the largest
-                    //  amount of data allowed by the control port(s)
-                    size_t max_bytes = std::min(size_t(max_req_size),
-                                                std::min(input_control.remaining_count,
-                                                         output_control.remaining_count));
-
-                    // if we're not the first in the chain, and we know the total bytes
-                    //  written by the predecessor, don't exceed that
-                    if (in_port->peer_guid != XFERDES_NO_GUID)
-                    {
-                        size_t pre_max = pbt_snapshot - in_port->local_bytes_total;
-                        if (pre_max == 0)
-                        {
-                            // should not happen with snapshots
-                            assert(0);
-                            // due to unsynchronized updates to pre_bytes_total, this path
-                            //  can happen for an empty transfer reading from an intermediate
-                            //  buffer - handle it by looping around and letting the check
-                            //  at the top of the loop notice it the second time around
-                            if (in_port->local_bytes_total == 0)
-                                continue;
-                            // otherwise, this shouldn't happen - we should detect this case
-                            //  on the the transfer of those last bytes
-                            assert(0);
-                            iteration_completed.store_release(true);
-                            break;
-                        }
-                        log_fpga.info() << "!!!!!!!pred limits xfer: " << max_bytes << " -> " << pre_max;
-                        if (pre_max < max_bytes)
-                        {
-                            max_bytes = pre_max;
-                        }
-
-                        // further limit by bytes we've actually received
-                        log_fpga.info() << "!!!!!!!before max_bytes: " << max_bytes << " in_port->local_bytes_total: " << in_port->local_bytes_total;
-                        max_bytes = in_port->seq_remote.span_exists(in_port->local_bytes_total, max_bytes);
-                        log_fpga.info() << "!!!!!!!after max_bytes: " << max_bytes << " in_port->local_bytes_total: " << in_port->local_bytes_total;
-                        if (max_bytes == 0)
-                        {
-                            // TODO: put this XD to sleep until we do have data
-                            break;
-                        }
-                    }
-
-                    if (out_port->peer_guid != XFERDES_NO_GUID)
-                    {
-                        // if we're writing to an intermediate buffer, make sure to not
-                        //  overwrite previously written data that has not been read yet
-                        max_bytes = out_port->seq_remote.span_exists(out_port->local_bytes_total, max_bytes);
-                        if (max_bytes == 0)
-                        {
-                            // TODO: put this XD to sleep until we do have data
-                            break;
-                        }
-                    }
-
-                    // tentatively get as much as we can from the source iterator
-                    size_t src_bytes = in_port->iter->step(max_bytes, src_info,
-                                                           flags & TransferIterator::SRC_FLAGMASK,
-                                                           true /*tentative*/);
-                    if (src_bytes == 0)
-                    {
-                        // not enough space for even one element
-                        // TODO: put this XD to sleep until we do have data
-                        break;
-                    }
-
-                    // destination step must be tentative for an non-IB source or
-                    //  target that might collapse dimensions differently
-                    bool dimension_mismatch_possible = (((in_port->peer_guid == XFERDES_NO_GUID) ||
-                                                         (out_port->peer_guid == XFERDES_NO_GUID)) &&
-                                                        ((flags & TransferIterator::LINES_OK) != 0));
-
-                    size_t dst_bytes = out_port->iter->step(src_bytes, dst_info,
-                                                            flags & TransferIterator::DST_FLAGMASK,
-                                                            true);
-                    if (dst_bytes == 0)
-                    {
-                        // not enough space for even one element
-
-                        // if this happens when the input is an IB, the output is not,
-                        //  and the input doesn't seem to be limited by max_bytes, this
-                        //  is (probably?) the case that requires padding on the input
-                        //  side
-                        if ((in_port->peer_guid != XFERDES_NO_GUID) &&
-                            (out_port->peer_guid == XFERDES_NO_GUID) &&
-                            (src_bytes < max_bytes))
-                        {
-                            log_fpga.info() << "padding input buffer by " << src_bytes << " bytes";
-                            src_info.bytes_per_chunk = 0;
-                            src_info.num_lines = 1;
-                            src_info.num_planes = 1;
-                            dst_info.bytes_per_chunk = 0;
-                            dst_info.num_lines = 1;
-                            dst_info.num_planes = 1;
-                            read_pad_bytes = src_bytes;
-                            src_bytes = 0;
-                            dimension_mismatch_possible = false;
-                            // src iterator will be confirmed below
-                            // in_port->iter->confirm_step();
-                            // dst didn't actually take a step, so we don't need to cancel it
-                        }
-                        else
-                        {
-                            in_port->iter->cancel_step();
-                            // TODO: put this XD to sleep until we do have data
-                            break;
-                        }
-                    }
-
-                    // does source now need to be shrunk?
-                    if (dst_bytes < src_bytes)
-                    {
-                        // cancel the src step and try to just step by dst_bytes
-                        in_port->iter->cancel_step();
-                        // this step must still be tentative if a dimension mismatch is
-                        //  posisble
-                        src_bytes = in_port->iter->step(dst_bytes, src_info,
-                                                        flags & TransferIterator::SRC_FLAGMASK,
-                                                        dimension_mismatch_possible);
-                        if (src_bytes == 0)
-                        {
-                            // corner case that should occur only with a destination
-                            //  intermediate buffer - no transfer, but pad to boundary
-                            //  destination wants as long as we're not being limited by
-                            //  max_bytes
-                            assert((in_port->peer_guid == XFERDES_NO_GUID) &&
-                                   (out_port->peer_guid != XFERDES_NO_GUID));
-                            if (dst_bytes < max_bytes)
-                            {
-                                log_fpga.info() << "padding output buffer by " << dst_bytes << " bytes";
-                                src_info.bytes_per_chunk = 0;
-                                src_info.num_lines = 1;
-                                src_info.num_planes = 1;
-                                dst_info.bytes_per_chunk = 0;
-                                dst_info.num_lines = 1;
-                                dst_info.num_planes = 1;
-                                write_pad_bytes = dst_bytes;
-                                dst_bytes = 0;
-                                dimension_mismatch_possible = false;
-                                // src didn't actually take a step, so we don't need to cancel it
-                                // out_port->iter->confirm_step();
-                            }
-                            else
-                            {
-                                // retry later
-                                // src didn't actually take a step, so we don't need to cancel it
-                                out_port->iter->cancel_step();
-                                break;
-                            }
-                        }
-                        // a mismatch is still possible if the source is 2+D and the
-                        //  destination wants to stop mid-span
-                        if (src_bytes < dst_bytes)
-                        {
-                            assert(dimension_mismatch_possible);
-                            out_port->iter->cancel_step();
-                            dst_bytes = out_port->iter->step(src_bytes, dst_info,
-                                                             flags & TransferIterator::DST_FLAGMASK,
-                                                             true /*tentative*/);
-                        }
-                        // byte counts now must match
-                        assert(src_bytes == dst_bytes);
-                    }
-                    else
-                    {
-                        // in the absense of dimension mismatches, it's safe now to confirm
-                        //  the source step
-                        if (!dimension_mismatch_possible)
-                        {
-                            // in_port->iter->confirm_step();
-                            ;
-                        }
-                    }
-
-                    // when 2D transfers are allowed, it is possible that the
-                    // bytes_per_chunk don't match, and we need to add an extra
-                    //  dimension to one side or the other
-                    // NOTE: this transformation can cause the dimensionality of the
-                    //  transfer to grow.  Allow this to happen and detect it at the
-                    //  end.
-                    if (!dimension_mismatch_possible)
-                    {
-                        assert(src_info.bytes_per_chunk == dst_info.bytes_per_chunk);
-                        assert(src_info.num_lines == 1);
-                        assert(src_info.num_planes == 1);
-                        assert(dst_info.num_lines == 1);
-                        assert(dst_info.num_planes == 1);
-                    }
-                    else
-                    {
-                        // track how much of src and/or dst is "lost" into a 4th
-                        //  dimension
-                        size_t src_4d_factor = 1;
-                        size_t dst_4d_factor = 1;
-                        if (src_info.bytes_per_chunk < dst_info.bytes_per_chunk)
-                        {
-                            size_t ratio = dst_info.bytes_per_chunk / src_info.bytes_per_chunk;
-                            assert((src_info.bytes_per_chunk * ratio) == dst_info.bytes_per_chunk);
-                            dst_4d_factor *= dst_info.num_planes; // existing planes lost
-                            dst_info.num_planes = dst_info.num_lines;
-                            dst_info.plane_stride = dst_info.line_stride;
-                            dst_info.num_lines = ratio;
-                            dst_info.line_stride = src_info.bytes_per_chunk;
-                            dst_info.bytes_per_chunk = src_info.bytes_per_chunk;
-                        }
-                        if (dst_info.bytes_per_chunk < src_info.bytes_per_chunk)
-                        {
-                            size_t ratio = src_info.bytes_per_chunk / dst_info.bytes_per_chunk;
-                            assert((dst_info.bytes_per_chunk * ratio) == src_info.bytes_per_chunk);
-                            src_4d_factor *= src_info.num_planes; // existing planes lost
-                            src_info.num_planes = src_info.num_lines;
-                            src_info.plane_stride = src_info.line_stride;
-                            src_info.num_lines = ratio;
-                            src_info.line_stride = dst_info.bytes_per_chunk;
-                            src_info.bytes_per_chunk = dst_info.bytes_per_chunk;
-                        }
-
-                        // similarly, if the number of lines doesn't match, we need to promote
-                        //  one of the requests from 2D to 3D
-                        if (src_info.num_lines < dst_info.num_lines)
-                        {
-                            size_t ratio = dst_info.num_lines / src_info.num_lines;
-                            assert((src_info.num_lines * ratio) == dst_info.num_lines);
-                            dst_4d_factor *= dst_info.num_planes; // existing planes lost
-                            dst_info.num_planes = ratio;
-                            dst_info.plane_stride = dst_info.line_stride * src_info.num_lines;
-                            dst_info.num_lines = src_info.num_lines;
-                        }
-                        if (dst_info.num_lines < src_info.num_lines)
-                        {
-                            size_t ratio = src_info.num_lines / dst_info.num_lines;
-                            assert((dst_info.num_lines * ratio) == src_info.num_lines);
-                            src_4d_factor *= src_info.num_planes; // existing planes lost
-                            src_info.num_planes = ratio;
-                            src_info.plane_stride = src_info.line_stride * dst_info.num_lines;
-                            src_info.num_lines = dst_info.num_lines;
-                        }
-
-                        // sanity-checks: src/dst should match on lines/planes and we
-                        //  shouldn't have multiple planes if we don't have multiple lines
-                        assert(src_info.num_lines == dst_info.num_lines);
-                        assert((src_info.num_planes * src_4d_factor) ==
-                               (dst_info.num_planes * dst_4d_factor));
-                        assert((src_info.num_lines > 1) || (src_info.num_planes == 1));
-                        assert((dst_info.num_lines > 1) || (dst_info.num_planes == 1));
-
-                        // only do as many planes as both src and dst can manage
-                        if (src_info.num_planes > dst_info.num_planes)
-                            src_info.num_planes = dst_info.num_planes;
-                        else
-                            dst_info.num_planes = src_info.num_planes;
-
-                        // if 3D isn't allowed, set num_planes back to 1
-                        if ((flags & TransferIterator::PLANES_OK) == 0)
-                        {
-                            src_info.num_planes = 1;
-                            dst_info.num_planes = 1;
-                        }
-
-                        // now figure out how many bytes we're actually able to move and
-                        //  if it's less than what we got from the iterators, try again
-                        size_t act_bytes = (src_info.bytes_per_chunk *
-                                            src_info.num_lines *
-                                            src_info.num_planes);
-                        if (act_bytes == src_bytes)
-                        {
-                            // things match up - confirm the steps
-                            // in_port->iter->confirm_step();
-                            // out_port->iter->confirm_step();
-                        }
-                        else
-                        {
-                            // log_fpga.info() << "dimension mismatch! " << act_bytes << " < " << src_bytes << " (" << bytes_total << ")";
-                            TransferIterator::AddressInfo dummy_info;
-                            in_port->iter->cancel_step();
-                            src_bytes = in_port->iter->step(act_bytes, dummy_info,
-                                                            flags & TransferIterator::SRC_FLAGMASK,
-                                                            true /*!tentative*/);
-                            assert(src_bytes == act_bytes);
-                            out_port->iter->cancel_step();
-                            dst_bytes = out_port->iter->step(act_bytes, dummy_info,
-                                                             flags & TransferIterator::DST_FLAGMASK,
-                                                             true /*!tentative*/);
-                            assert(dst_bytes == act_bytes);
-                        }
-                    }
-
-                    size_t act_bytes = (src_info.bytes_per_chunk *
-                                        src_info.num_lines *
-                                        src_info.num_planes);
-                    read_seq = in_port->local_bytes_total;
-                    read_bytes = act_bytes + read_pad_bytes;
-
-                    // update bytes read unless we're using indirection
-                    if (in_port->indirect_port_idx < 0)
-                        in_port->local_bytes_total += read_bytes;
-
-                    write_seq = out_port->local_bytes_total;
-                    write_bytes = act_bytes + write_pad_bytes;
-                    out_port->local_bytes_total += write_bytes;
-                    out_port->local_bytes_cons.store(out_port->local_bytes_total); // completion detection uses this
-                }
-
-                Request *new_req = dequeue_request();
-                new_req->src_port_idx = input_control.current_io_port;
-                new_req->dst_port_idx = output_control.current_io_port;
-                new_req->read_seq_pos = read_seq;
-                new_req->read_seq_count = read_bytes;
-                new_req->write_seq_pos = write_seq;
-                new_req->write_seq_count = write_bytes;
-                new_req->dim = ((src_info.num_planes == 1) ? ((src_info.num_lines == 1) ? Request::DIM_1D : Request::DIM_2D) : Request::DIM_3D);
-                new_req->src_off = src_info.base_offset;
-                new_req->dst_off = dst_info.base_offset;
-                new_req->nbytes = src_info.bytes_per_chunk;
-                new_req->nlines = src_info.num_lines;
-                new_req->src_str = src_info.line_stride;
-                new_req->dst_str = dst_info.line_stride;
-                new_req->nplanes = src_info.num_planes;
-                new_req->src_pstr = src_info.plane_stride;
-                new_req->dst_pstr = dst_info.plane_stride;
-
-                // we can actually hit the end of an intermediate buffer input
-                //  even if our initial pbt_snapshot was (size_t)-1 because
-                //  we use the asynchronously-updated seq_pre_write, so if
-                //  we think we might be done, go ahead and resample here if
-                //  we still have -1
-                if ((in_port->peer_guid != XFERDES_NO_GUID) &&
-                    (pbt_snapshot == (size_t)-1))
-                    pbt_snapshot = in_port->remote_bytes_total.load_acquire();
-
-                // if we have control ports, they tell us when we're done
-                if ((input_control.control_port_idx >= 0) ||
-                    (output_control.control_port_idx >= 0))
-                {
-                    // update control port counts, which may also flag a completed iteration
-                    size_t input_count = read_bytes - read_pad_bytes;
-                    size_t output_count = write_bytes - write_pad_bytes;
-                    // if we're serializing or deserializing, we count in elements,
-                    //  not bytes
-                    if (in_port->serdez_op != 0)
-                    {
-                        // serializing impacts output size
-                        assert((output_count % in_port->serdez_op->max_serialized_size) == 0);
-                        output_count /= in_port->serdez_op->max_serialized_size;
-                    }
-                    if (out_port->serdez_op != 0)
-                    {
-                        // and deserializing impacts input size
-                        assert((input_count % out_port->serdez_op->max_serialized_size) == 0);
-                        input_count /= out_port->serdez_op->max_serialized_size;
-                    }
-                    assert(input_control.remaining_count >= input_count);
-                    assert(output_control.remaining_count >= output_count);
-                    input_control.remaining_count -= input_count;
-                    output_control.remaining_count -= output_count;
-                    if (((input_control.remaining_count == 0) && input_control.eos_received) ||
-                        ((output_control.remaining_count == 0) && output_control.eos_received))
-                    {
-                        log_fpga.info() << "iteration completed via control port: xd=" << std::hex << guid << std::dec;
-                        iteration_completed.store_release(true);
-
-                        // give all output channels a chance to indicate completion
-                        for (size_t i = 0; i < output_ports.size(); i++)
-                            if (int(i) != output_control.current_io_port)
-                                update_bytes_write(i, output_ports[i].local_bytes_total, 0);
-#if 0
-	      // non-ib iterators should end at the same time?
-	      for(size_t i = 0; i < input_ports.size(); i++)
-		assert((input_ports[i].peer_guid != XFERDES_NO_GUID) ||
-		       input_ports[i].iter->done());
-	      for(size_t i = 0; i < output_ports.size(); i++)
-		assert((output_ports[i].peer_guid != XFERDES_NO_GUID) ||
-		       output_ports[i].iter->done());
-#endif
-                    }
-                }
-                else
-                {
-                    // otherwise, we go by our iterators
-                    if (in_port->iter->done() || out_port->iter->done() ||
-                        (in_port->local_bytes_total == pbt_snapshot))
-                    {
-                        assert(!iteration_completed.load());
-                        iteration_completed.store_release(true);
-
-                        // give all output channels a chance to indicate completion
-                        for (size_t i = 0; i < output_ports.size(); i++)
-                            if (int(i) != output_control.current_io_port)
-                                update_bytes_write(i, output_ports[i].local_bytes_total, 0);
-
-                                // TODO: figure out how to eliminate false positives from these
-                                //  checks with indirection and/or multiple remote inputs
-#if 0
-	      // non-ib iterators should end at the same time
-	      assert((in_port->peer_guid != XFERDES_NO_GUID) || in_port->iter->done());
-	      assert((out_port->peer_guid != XFERDES_NO_GUID) || out_port->iter->done());
-#endif
-
-                        if (!in_port->serdez_op && out_port->serdez_op)
-                        {
-                            // ok to be over, due to the conservative nature of
-                            //  deserialization reads
-                            assert((rbc_snapshot >= pbt_snapshot) ||
-                                   (pbt_snapshot == size_t(-1)));
-                        }
-                        else
-                        {
-                            // TODO: this check is now too aggressive because the previous
-                            //  xd doesn't necessarily know when it's emitting its last
-                            //  data, which means the update of local_bytes_total might
-                            //  be delayed
-#if 0
-		assert((in_port->peer_guid == XFERDES_NO_GUID) ||
-		       (pbt_snapshot == in_port->local_bytes_total));
-#endif
-                        }
-                    }
-                }
-
-                switch (new_req->dim)
-                {
-                case Request::DIM_1D:
-                {
-                    log_fpga.info() << "request: guid=" << std::hex << guid << std::dec
-                                    << " ofs=" << new_req->src_off << "->" << new_req->dst_off
-                                    << " len=" << new_req->nbytes;
-                    break;
-                }
-                case Request::DIM_2D:
-                {
-                    log_fpga.info() << "request: guid=" << std::hex << guid << std::dec
-                                    << " ofs=" << new_req->src_off << "->" << new_req->dst_off
-                                    << " len=" << new_req->nbytes
-                                    << " lines=" << new_req->nlines << "(" << new_req->src_str << "," << new_req->dst_str << ")";
-                    break;
-                }
-                case Request::DIM_3D:
-                {
-                    log_fpga.info() << "request: guid=" << std::hex << guid << std::dec
-                                    << " ofs=" << new_req->src_off << "->" << new_req->dst_off
-                                    << " len=" << new_req->nbytes
-                                    << " lines=" << new_req->nlines << "(" << new_req->src_str << "," << new_req->dst_str << ")"
-                                    << " planes=" << new_req->nplanes << "(" << new_req->src_pstr << "," << new_req->dst_pstr << ")";
-                    break;
-                }
-                }
-                reqs[idx++] = new_req;
-            }
-            return idx;
-        }
-
         long FPGAXferDes::get_requests(Request **requests, long nr)
         {
             FPGARequest **reqs = (FPGARequest **)requests;
@@ -2543,8 +1361,7 @@ namespace Realm
             // unsigned flags = (TransferIterator::LINES_OK |
             //                   TransferIterator::PLANES_OK);
             unsigned flags = 0;
-            long new_nr = default_get_requests_tentative(requests, nr, flags);
-            // long new_nr = default_get_requests(requests, nr, flags);
+            long new_nr = default_get_requests(requests, nr, flags);
             for (long i = 0; i < new_nr; i++)
             {
                 switch (kind)
@@ -2552,17 +1369,25 @@ namespace Realm
                 case XFER_FPGA_TO_DEV:
                 {
                     reqs[i]->src_base = input_ports[reqs[i]->src_port_idx].mem->get_direct_ptr(reqs[i]->src_off, reqs[i]->nbytes);
+                    reqs[i]->dst_base = output_ports[reqs[i]->dst_port_idx].mem->get_direct_ptr(reqs[i]->dst_off, reqs[i]->nbytes);
                     assert(reqs[i]->src_base != 0);
+                    assert(reqs[i]->dst_base != 0);
                     break;
                 }
                 case XFER_FPGA_FROM_DEV:
                 {
+                    reqs[i]->src_base = input_ports[reqs[i]->src_port_idx].mem->get_direct_ptr(reqs[i]->src_off, reqs[i]->nbytes);
                     reqs[i]->dst_base = output_ports[reqs[i]->dst_port_idx].mem->get_direct_ptr(reqs[i]->dst_off, reqs[i]->nbytes);
+                    assert(reqs[i]->src_base != 0);
                     assert(reqs[i]->dst_base != 0);
                     break;
                 }
                 case XFER_FPGA_IN_DEV:
                 {
+                    reqs[i]->src_base = input_ports[reqs[i]->src_port_idx].mem->get_direct_ptr(reqs[i]->src_off, reqs[i]->nbytes);
+                    reqs[i]->dst_base = output_ports[reqs[i]->dst_port_idx].mem->get_direct_ptr(reqs[i]->dst_off, reqs[i]->nbytes);
+                    assert(reqs[i]->src_base != 0);
+                    assert(reqs[i]->dst_base != 0);
                     break;
                 }
                 case XFER_FPGA_PEER_DEV:
@@ -2570,15 +1395,11 @@ namespace Realm
                     reqs[i]->dst_fpga = dst_fpga;
                     break;
                 }
-                case XFER_FPGA_TO_DEV_COMP:
+                case XFER_FPGA_COMP:
                 {
                     reqs[i]->src_base = input_ports[reqs[i]->src_port_idx].mem->get_direct_ptr(reqs[i]->src_off, reqs[i]->nbytes);
-                    assert(reqs[i]->src_base != 0);
-                    break;
-                }
-                case XFER_FPGA_FROM_DEV_COMP:
-                {
                     reqs[i]->dst_base = output_ports[reqs[i]->dst_port_idx].mem->get_direct_ptr(reqs[i]->dst_off, reqs[i]->nbytes);
+                    assert(reqs[i]->src_base != 0);
                     assert(reqs[i]->dst_base != 0);
                     break;
                 }
@@ -2628,6 +1449,7 @@ namespace Realm
             src_fpga = _src_fpga;
 
             Memory temp_fpga_mem = src_fpga->fpga_mem->me;
+            Memory temp_fpga_ib_mem = src_fpga->fpga_ib->me;
             Memory temp_sys_mem = src_fpga->local_sysmem->me;
             Memory temp_rdma_mem = src_fpga->local_ibmem->me;
 
@@ -2639,52 +1461,41 @@ namespace Realm
                 unsigned latency = 0;
                 add_path(temp_sys_mem, temp_fpga_mem, bw, latency, false, false, XFER_FPGA_TO_DEV);
                 add_path(temp_rdma_mem, temp_fpga_mem, bw, latency, false, false, XFER_FPGA_TO_DEV);
+                add_path(temp_sys_mem, temp_fpga_ib_mem, bw, latency, false, false, XFER_FPGA_TO_DEV);
                 break;
             }
-
             case XFER_FPGA_FROM_DEV:
             {
                 unsigned bw = 0; // TODO
                 unsigned latency = 0;
                 add_path(temp_fpga_mem, temp_sys_mem, bw, latency, false, false, XFER_FPGA_FROM_DEV);
                 add_path(temp_fpga_mem, temp_rdma_mem, bw, latency, false, false, XFER_FPGA_FROM_DEV);
+                add_path(temp_fpga_ib_mem, temp_sys_mem, bw, latency, false, false, XFER_FPGA_FROM_DEV);
                 break;
             }
-
             case XFER_FPGA_IN_DEV:
             {
                 // self-path
                 unsigned bw = 0; // TODO
                 unsigned latency = 0;
                 add_path(temp_fpga_mem, temp_fpga_mem, bw, latency, false, false, XFER_FPGA_IN_DEV);
+                add_path(temp_fpga_ib_mem, temp_fpga_ib_mem, bw, latency, false, false, XFER_FPGA_IN_DEV);
                 break;
             }
-
             case XFER_FPGA_PEER_DEV:
             {
                 // just do paths to peers - they'll do the other side
                 assert(0 && "not implemented");
                 break;
             }
-
-            case XFER_FPGA_TO_DEV_COMP:
+            case XFER_FPGA_COMP:
             {
                 unsigned bw = 0; // TODO
                 unsigned latency = 0;
-                add_path(temp_sys_mem, temp_fpga_mem, bw, latency, false, false, XFER_FPGA_TO_DEV_COMP);
-                add_path(temp_rdma_mem, temp_fpga_mem, bw, latency, false, false, XFER_FPGA_TO_DEV_COMP);
+                add_path(temp_fpga_mem, temp_fpga_mem, bw, latency, false, false, XFER_FPGA_COMP);
+                add_path(temp_fpga_ib_mem, temp_fpga_ib_mem, bw, latency, false, false, XFER_FPGA_COMP);
                 break;
             }
-
-            case XFER_FPGA_FROM_DEV_COMP:
-            {
-                unsigned bw = 0; // TODO
-                unsigned latency = 0;
-                add_path(temp_fpga_mem, temp_sys_mem, bw, latency, false, false, XFER_FPGA_FROM_DEV_COMP);
-                add_path(temp_fpga_mem, temp_rdma_mem, bw, latency, false, false, XFER_FPGA_FROM_DEV_COMP);
-                break;
-            }
-
             default:
                 assert(0);
             }
@@ -2734,28 +1545,30 @@ namespace Realm
                     switch (kind)
                     {
                     case XFER_FPGA_TO_DEV:
-                        src_fpga->copy_to_fpga(req->dst_off, req->src_base,
+                        src_fpga->copy_to_fpga(req->dst_base, req->src_base,
+                                               req->dst_off, req->src_off,
                                                req->nbytes, &req->event);
                         break;
                     case XFER_FPGA_FROM_DEV:
-                        src_fpga->copy_from_fpga(req->dst_base, req->src_off,
+                        src_fpga->copy_from_fpga(req->dst_base, req->src_base,
+                                                 req->dst_off, req->src_off,
                                                  req->nbytes, &req->event);
                         break;
                     case XFER_FPGA_IN_DEV:
-                        src_fpga->copy_within_fpga(req->dst_off, req->src_off,
+                        src_fpga->copy_within_fpga(req->dst_base, req->src_base,
+                                                   req->dst_off, req->src_off,
                                                    req->nbytes, &req->event);
                         break;
                     case XFER_FPGA_PEER_DEV:
-                        src_fpga->copy_to_peer(req->dst_fpga, req->dst_off,
-                                               req->src_off, req->nbytes, &req->event);
+                        src_fpga->copy_to_peer(req->dst_fpga,
+                                               req->dst_base, req->src_base,
+                                               req->dst_off, req->src_off,
+                                               req->nbytes, &req->event);
                         break;
-                    case XFER_FPGA_TO_DEV_COMP:
-                        src_fpga->copy_to_fpga_comp(req->dst_off, req->src_base,
-                                                    req->nbytes, &req->event);
-                        break;
-                    case XFER_FPGA_FROM_DEV_COMP:
-                        src_fpga->copy_from_fpga_comp(req->dst_base, req->src_off,
-                                                      req->nbytes, &req->event);
+                    case XFER_FPGA_COMP:
+                        src_fpga->comp(req->dst_base, req->src_base,
+                                       req->dst_off, req->src_off,
+                                       req->nbytes, &req->event);
                         break;
                     default:
                         assert(0);
@@ -2779,10 +1592,7 @@ namespace Realm
                     case XFER_FPGA_PEER_DEV:
                         assert(0 && "not implemented");
                         break;
-                    case XFER_FPGA_TO_DEV_COMP:
-                        assert(0 && "not implemented");
-                        break;
-                    case XFER_FPGA_FROM_DEV_COMP:
+                    case XFER_FPGA_COMP:
                         assert(0 && "not implemented");
                         break;
                     default:
@@ -2807,10 +1617,7 @@ namespace Realm
                     case XFER_FPGA_PEER_DEV:
                         assert(0 && "not implemented");
                         break;
-                    case XFER_FPGA_TO_DEV_COMP:
-                        assert(0 && "not implemented");
-                        break;
-                    case XFER_FPGA_FROM_DEV_COMP:
+                    case XFER_FPGA_COMP:
                         assert(0 && "not implemented");
                         break;
                     default:
@@ -2965,11 +1772,7 @@ namespace Realm
                     printf("\n");
 
                     log_fpga.info() << "before write buffer, initial_out_offset " << initial_out_offset << " total_bytes " << total_bytes;
-                    // cl_buffer_region buff_info = {initial_out_offset, total_bytes};
-                    // cl::Buffer temp_buff;
-                    // OCL_CHECK(err, temp_buff = channel->fpga->buff.createSubBuffer(CL_MEM_HOST_WRITE_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &buff_info, &err));
-                    // OCL_CHECK(err, err = channel->fpga->command_queue.enqueueMigrateMemObjects({temp_buff}, 0 /* 0 means from host*/));
-                    // OCL_CHECK(err, err = channel->fpga->command_queue.finish());
+
                     cl_int err = 0;
                     OCL_CHECK(err, err = channel->fpga->command_queue.enqueueWriteBuffer(channel->fpga->buff,                                                              // buffer on the FPGA
                                                                                          CL_TRUE,                                                                          // blocking call

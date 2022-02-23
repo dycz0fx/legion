@@ -122,25 +122,31 @@ namespace Realm
             std::string name;
             cl::Device device;
             cl::Buffer buff;
+            cl::Buffer ib_buff;
             cl::Context context;
             cl::CommandQueue command_queue;
             cl::Program program;
-            FPGADevice(cl::Device &device, std::string name, std::string xclbin, FPGAWorker *fpga_worker);
+            FPGADevice(cl::Device &device, std::string name, std::string xclbin, FPGAWorker *fpga_worker, size_t fpga_coprocessor_num_cu, std::string fpga_coprocessor_kernel);
             ~FPGADevice();
             void create_fpga_mem(RuntimeImpl *runtime, size_t size);
+            void create_fpga_ib(RuntimeImpl *runtime, size_t size);
             void create_dma_channels(RuntimeImpl *runtime);
             void create_fpga_queues();
-            void copy_to_fpga(off_t dst_offset, const void *src, size_t bytes, FPGACompletionNotification *event);
-            void copy_from_fpga(void *dst, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
-            void copy_within_fpga(off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
-            void copy_to_peer(FPGADevice *dst, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
-            void copy_to_fpga_comp(off_t dst_offset, const void *src, size_t bytes, FPGACompletionNotification *event);
-            void copy_from_fpga_comp(void *dst, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
+            void copy_to_fpga(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
+            void copy_from_fpga(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
+            void copy_within_fpga(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
+            void copy_to_peer(FPGADevice *dst_dev, void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
+            void comp(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
+            bool is_in_buff(void *ptr);
+            bool is_in_ib_buff(void *ptr);
             FPGADeviceMemory *fpga_mem;
+            IBMemory *fpga_ib;
             MemoryImpl *local_sysmem;
             IBMemory *local_ibmem;
             FPGAWorker *fpga_worker;
             FPGAQueue *fpga_queue;
+            size_t fpga_coprocessor_num_cu;
+            std::string fpga_coprocessor_kernel;
         };
 
         enum FPGAMemcpyKind
@@ -177,8 +183,8 @@ namespace Realm
                                const void *src,
                                size_t bytes,
                                off_t buff_offset,
-                               FPGAMemcpyKind _kind,
-                               FPGACompletionNotification *_notification);
+                               FPGAMemcpyKind kind,
+                               FPGACompletionNotification *notification);
 
             virtual ~FPGADeviceMemcpy1D(void);
 
@@ -230,7 +236,6 @@ namespace Realm
             void *dst_base;
             FPGADevice *dst_fpga;
             FPGACompletionEvent event;
-            size_t new_nbytes = 0; // new num of bytes after compression
         };
 
         class FPGAChannel;
@@ -263,7 +268,7 @@ namespace Realm
             bool progress_xd(FPGAChannel *channel, TimeLimit work_until);
 
         private:
-            //   FPGADevice *src_fpga;
+            FPGADevice *src_fpga;
             FPGADevice *dst_fpga;
         };
 
@@ -374,10 +379,14 @@ namespace Realm
             bool cfg_use_worker_threads;
             bool cfg_use_shared_worker;
             size_t cfg_fpga_mem_size;
+            size_t cfg_fpga_ib_size;
             FPGAWorker *shared_worker;
             std::map<FPGADevice *, FPGAWorker *> dedicated_workers;
             std::string cfg_fpga_xclbin;
             std::vector<FPGADevice *> fpga_devices;
+            size_t cfg_fpga_coprocessor_num_cu;
+            std::string cfg_fpga_coprocessor_kernel;
+
 
         protected:
             std::vector<FPGAProcessor *> fpga_procs_;

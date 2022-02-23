@@ -52,7 +52,7 @@ typedef unsigned long long realm_barrier_timestamp_t;
   __op__(PROC_SET, "Set of Processors for OpenMP/Kokkos etc.") \
   __op__(OMP_PROC, "OpenMP (or similar) thread pool") \
   __op__(PY_PROC, "Python interpreter") \
-  __op__(FPGA_PROC, "FPGA accelerator")
+  __op__(FPGA_PROC, "FPGA")
 
 typedef enum realm_processor_kind_t {
 #define C_ENUMS(name, desc) name,

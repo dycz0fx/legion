@@ -676,19 +676,20 @@ endif
 # Realm doesn't use FPGA by default
 USE_FPGA ?= 0
 ifeq ($(strip $(USE_FPGA)), 1)
-  REALM_CC_FLAGS      += -DREALM_USE_FPGA
-  LEGION_CC_FLAGS     += -DLEGION_USE_FPGA
+  REALM_CC_FLAGS += -DREALM_USE_FPGA
+  REALM_CC_FLAGS += -DREALM_USE_FPGA_COPROCESSOR
+  LEGION_CC_FLAGS += -DLEGION_USE_FPGA
   # provide this for backward-compatibility in applications
-  CC_FLAGS            += -DUSE_FPGA -I$(XILINX_VIVADO)/include -I$(XILINX_XRT)/include
-  FC_FLAGS	      += -DUSE_FPGA
-  LEGION_LD_FLAGS      += -L$(XILINX_XRT)/lib -lOpenCL -pthread
+  CC_FLAGS += -DUSE_FPGA -I$(XILINX_VIVADO)/include -I$(XILINX_XRT)/include 
+  FC_FLAGS += -DUSE_FPGA
+  LEGION_LD_FLAGS += -L$(XILINX_XRT)/lib -lOpenCL -pthread
   ifdef FPGA_ROOT
-       CC_FLAGS    += -I$(FPGA_ROOT)/include
-       FC_FLAGS    += -I$(FPGA_ROOT)/include
-       LD_FLAGS    += -L$(FPGA_ROOT)/lib
+       CC_FLAGS += -I$(FPGA_ROOT)/include
+       FC_FLAGS += -I$(FPGA_ROOT)/include
+       LD_FLAGS += -L$(FPGA_ROOT)/lib
   else
-    CC_FLAGS      += -I/usr/include
-    FC_FLAGS	  += -I/usr/include
+    CC_FLAGS += -I/usr/include
+    FC_FLAGS += -I/usr/include
   endif
 endif
 
