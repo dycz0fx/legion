@@ -20,10 +20,22 @@ endif
 # vpath stuff below doesn't like a trailing slash in LG_RT_DIR
 override LG_RT_DIR := $(patsubst %/,%,$(LG_RT_DIR))
 
-#Flags for directing the runtime makefile what to include
-DEBUG=1                   # Include debugging symbols
-OUTPUT_LEVEL=LEVEL_DEBUG  # Compile time print level
-#ALT_MAPPERS=1		  # Compile the alternative mappers
+# Flags for directing the runtime makefile what to include
+DEBUG           ?= 1		# Include debugging symbols
+MAX_DIM         ?= 3		# Maximum number of dimensions
+OUTPUT_LEVEL    ?= LEVEL_DEBUG	# Compile time logging level
+USE_CUDA        ?= 0		# Include CUDA support (requires CUDA)
+USE_GASNET      ?= 0		# Include GASNet support (requires GASNet)
+USE_HDF         ?= 0		# Include HDF5 support (requires HDF5)
+ALT_MAPPERS     ?= 0		# Include alternative mappers (not recommended)
+
+# Include FPGA support (requires Xilinx FPGA)
+USE_FPGA        ?= 1   
+# Path to the Xilinx platform definition file
+PLATFORM        ?= /home/centos/src/project_data/aws-fpga/Vitis/aws_platform/xilinx_aws-vu9p-f1_shell-v04261818_201920_2/xilinx_aws-vu9p-f1_shell-v04261818_201920_2.xpfm
+# Software emulation (sw_emu), hardware emulation (hw_emu), hardware (hw)
+TARGET          ?= sw_emu
+
 
 # Put the binary file name here
 OUTFILE		:= 
@@ -37,35 +49,19 @@ CC_FLAGS	?=
 NVCC_FLAGS	?=
 GASNET_FLAGS	?=
 LD_FLAGS	?=
-
 CXX ?= g++
+VPPFLAGS = -g -I.
 
 # we're going to include runtime.mk to get variable settings, but then
 #  do our own build steps
 NO_BUILD_RULES=1
 include $(LG_RT_DIR)/runtime.mk
 
-TESTS := serializing test_profiling ctxswitch barrier_reduce taskreg memspeed idcheck inst_reuse transpose
-TESTS += proc_group
-TESTS += deppart
-TESTS += scatter
-TESTS += compqueue
-TESTS += event_subscribe
-TESTS += deferred_allocs
-TESTS += test_nodeset
-TESTS += subgraphs
-TESTS += large_tls
-TESTS += coverings
-TESTS += alltoall
-TESTS += simple_reduce
+TESTS := fpga_vadd fpga_coprocessor
 
 # can set arguments to be passed to a test when running
-TESTARGS_ctxswitch := -ll:io 1 -t 20 -i 10000
-TESTARGS_proc_group := -ll:cpu 4
-TESTARGS_compqueue := -ll:cpu 4
-TESTARGS_event_subscribe := -ll:cpu 4
-TESTARGS_deferred_allocs := -ll:gsize 0 -all
-TESTARGS_scatter := -p1 2 -p2 2
+TESTARGS_fpga_vadd :=  -ll:fpga 1 -ll:fpga_size 400 -ll:fpga_xclbin vadd.xclbin -level fpga=1 -level app=1
+TESTARGS_fpga_coprocessor := -ll:fpga 1 -ll:fpga_size 4 -ll:fpga_xclbin vadd.xclbin -ll:fpga_coprocessor_kernel vadd -ll:fpga_coprocessor_num_cu 1  -level fpga=1 -level app=1
 
 REALM_OBJS := $(patsubst %.cc,%.o,$(notdir $(REALM_SRC))) \
               $(patsubst %.cc.o,%.o,$(notdir $(REALM_INST_OBJS))) \
@@ -75,7 +71,6 @@ SPACE := $(EMPTY) $(EMPTY)
 RUNTIME_VPATH := $(subst $(SPACE),:,$(sort $(dir $(REALM_SRC))))
 vpath %.cc .:$(RUNTIME_VPATH)
 vpath %.S .:$(RUNTIME_VPATH)
-#VPATH = .:$(RUNTIME_VPATH)
 
 REALM_LIB := librealm.a
 
@@ -86,33 +81,19 @@ run_all : $(TESTS:%=run_%)
 run_% : %
 	@# this echos exactly once, even if -s was specified
 	@echo $(LAUNCHER) ./$* $(TESTARGS_$*)
-	@$(LAUNCHER) ./$* $(TESTARGS_$*)
+	@XCL_EMULATION_MODE=$(TARGET) $(LAUNCHER) ./$* $(TESTARGS_$*)
 
-build : $(TESTS)
+build : $(TESTS) vadd.xclbin emconfig
 
 clean :
 	rm -f $(REALM_LIB) $(REALM_OBJS) $(TESTS) $(TEST_OBJS)
 
-# scatter uses C++11 lambdas
-scatter.o : CC_FLAGS += -std=c++11
-
 $(TESTS) : % : %.o librealm.a
-	$(CXX) -o $@ $< $(EXTRAOBJS_$*) -L. -lrealm $(LEGION_LD_FLAGS) $(LD_FLAGS)
+	$(CXX) -o $@ $< -L. -lrealm $(LEGION_LD_FLAGS) $(LD_FLAGS)
 
 $(REALM_LIB) : $(REALM_OBJS)
 	rm -f $(REALM_LIB)
 	ar rc $(REALM_LIB) $(REALM_OBJS)
-
-ifeq ($(strip $(USE_CUDA)),1)
-EXTRAOBJS_memspeed := memspeed_gpu.o
-EXTRAOBJS_simple_reduce := simple_reduce_gpu.o
-TEST_OBJS += $(EXTRAOBJS_memspeed) $(EXTRAOBJS_simple_reduce)
-memspeed : memspeed_gpu.o
-simple_reduce : simple_reduce_gpu.o
-
-%.o : %.cu $(REALM_DEFINES_HEADER) $(LEGION_DEFINES_HEADER)
-	$(NVCC) -o $@ -c $< $(INC_FLAGS) $(NVCC_FLAGS)
-endif
 
 %.o : %.cc $(REALM_DEFINES_HEADER) $(LEGION_DEFINES_HEADER)
 	$(CXX) -fPIC -o $@ -c $< $(INC_FLAGS) $(CC_FLAGS)
@@ -154,3 +135,15 @@ byfield_%.cc :
 
 .INTERMEDIATE: $(patsubst %.cc.o,%.cc,$(notdir $(REALM_INST_OBJS)))
 endif
+
+# Create FPGA kernel (vadd with 4 CUs)
+vadd.xo: vadd.cpp 
+	v++ $(VPPFLAGS) -t $(TARGET) --platform $(PLATFORM) -c -k vadd -o vadd.xo vadd.cpp
+
+vadd.xclbin: vadd.xo
+	v++ $(VPPFLAGS) -t $(TARGET) --platform $(PLATFORM) -l --connectivity.nk vadd:4 --connectivity.sp vadd_1.m_axi_gmem:DDR[0] --connectivity.sp vadd_2.m_axi_gmem:DDR[0] --connectivity.sp vadd_3.m_axi_gmem:DDR[0] --connectivity.sp vadd_4.m_axi_gmem:DDR[0] -o vadd.xclbin vadd.xo
+
+# Create emulation config file
+emconfig: emconfig.json
+emconfig.json:
+	emconfigutil --platform $(PLATFORM)

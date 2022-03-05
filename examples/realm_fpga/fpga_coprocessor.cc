@@ -112,7 +112,7 @@ void top_level_task(const void *args, size_t arglen,
 
 int main(int argc, char **argv)
 {
-    sleep(20);
+    // sleep(20);
     size_t size = 12;
     int message[size];
     for (size_t i = 0; i < size; i++)

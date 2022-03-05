@@ -8,7 +8,7 @@
 #include "realm/transfer/channel.h"
 #include "realm/circ_queue.h"
 
-// OpenCL utility layer include
+// OpenCL utility layer
 #include "xcl2.hpp"
 
 namespace Realm
@@ -37,10 +37,6 @@ namespace Realm
             FPGARequest *req;
         };
 
-        // a FPGAWorker is responsible for making progress
-        // on one or more Command Queues -
-        // this may be done directly by an FPGAProcessor
-        // or in a background thread spawned for the purpose
         class FPGAWorker : public BackgroundWorkItem
         {
         public:
@@ -72,6 +68,7 @@ namespace Realm
             bool thread_sleeping;
             atomic<bool> worker_shutdown_requested;
         };
+
 
         class FPGAWorkFence : public Realm::Operation::AsyncWorkItem
         {
@@ -132,11 +129,11 @@ namespace Realm
             void create_fpga_ib(RuntimeImpl *runtime, size_t size);
             void create_dma_channels(RuntimeImpl *runtime);
             void create_fpga_queues();
-            void copy_to_fpga(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
-            void copy_from_fpga(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
-            void copy_within_fpga(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
-            void copy_to_peer(FPGADevice *dst_dev, void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
-            void comp(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *event);
+            void copy_to_fpga(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *notification);
+            void copy_from_fpga(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *notification);
+            void copy_within_fpga(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *notification);
+            void copy_to_peer(FPGADevice *dst_dev, void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *notification);
+            void comp(void *dst, const void *src, off_t dst_offset, off_t src_offset, size_t bytes, FPGACompletionNotification *notification);
             bool is_in_buff(void *ptr);
             bool is_in_ib_buff(void *ptr);
             FPGADeviceMemory *fpga_mem;
@@ -386,7 +383,6 @@ namespace Realm
             std::vector<FPGADevice *> fpga_devices;
             size_t cfg_fpga_coprocessor_num_cu;
             std::string cfg_fpga_coprocessor_kernel;
-
 
         protected:
             std::vector<FPGAProcessor *> fpga_procs_;
