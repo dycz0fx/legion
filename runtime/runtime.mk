@@ -675,9 +675,12 @@ endif
 
 # Realm doesn't use FPGA by default
 USE_FPGA ?= 0
+USE_FPGA_COPROCESSOR ?= 0
 ifeq ($(strip $(USE_FPGA)), 1)
   REALM_CC_FLAGS += -DREALM_USE_FPGA
-  REALM_CC_FLAGS += -DREALM_USE_FPGA_COPROCESSOR
+  ifeq ($(strip $(USE_FPGA_COPROCESSOR)), 1)
+    REALM_CC_FLAGS += -DREALM_USE_FPGA_COPROCESSOR
+  endif
   LEGION_CC_FLAGS += -DLEGION_USE_FPGA
   # provide this for backward-compatibility in applications
   CC_FLAGS += -DUSE_FPGA -I$(XILINX_VIVADO)/include -I$(XILINX_XRT)/include 

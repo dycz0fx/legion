@@ -25,7 +25,17 @@ OUTPUT_LEVEL    ?= LEVEL_DEBUG	# Compile time logging level
 USE_GASNET      ?= 0		# Include GASNet support (requires GASNet)
 USE_HDF         ?= 0		# Include HDF5 support (requires HDF5)
 ALT_MAPPERS     ?= 0		# Include alternative mappers (not recommended)
-USE_FPGA        ?= 1    # Include FPGA support
+
+# Include FPGA support (requires Xilinx FPGA)
+USE_FPGA        ?= 1 
+# Include FPGA coprocessor support
+USE_FPGA_COPROCESSOR ?= 0
+# Path to the Xilinx platform definition file
+PLATFORM        ?= /home/centos/src/project_data/aws-fpga/Vitis/aws_platform/xilinx_aws-vu9p-f1_shell-v04261818_201920_2/xilinx_aws-vu9p-f1_shell-v04261818_201920_2.xpfm
+# FPGA kenrel compilation target: Software emulation (sw_emu), hardware emulation (hw_emu), hardware (hw)
+TARGET          ?= sw_emu
+# v++ flags
+VPPFLAGS = -g -I.
 
 # Put the binary file name here
 OUTFILE		?= fpga
@@ -39,6 +49,30 @@ NVCC_FLAGS	?=
 HIPCC_FLAGS     ?=
 GASNET_FLAGS	?=
 LD_FLAGS	?=
+
+.PHONY: run
+run: kernel all
+	XCL_EMULATION_MODE=$(TARGET) ./fpga -ll:fpga 1 -ll:fpga_size 4 -ll:fpga_xclbin vadd.xclbin
+
+kernel: vadd.xclbin emconfig
+
+vadd.xo: vadd.cpp 
+	v++ $(VPPFLAGS) -t $(TARGET) --platform $(PLATFORM) -c -k vadd -o vadd.xo vadd.cpp
+
+# create 4 CUs
+vadd.xclbin: vadd.xo
+	v++ $(VPPFLAGS) -t $(TARGET) --platform $(PLATFORM) -l --connectivity.nk vadd:4 --connectivity.sp vadd_1.m_axi_gmem:DDR[0] --connectivity.sp vadd_2.m_axi_gmem:DDR[0] --connectivity.sp vadd_3.m_axi_gmem:DDR[0] --connectivity.sp vadd_4.m_axi_gmem:DDR[0] -o vadd.xclbin vadd.xo
+
+emconfig: emconfig.json
+emconfig.json:
+	emconfigutil --platform $(PLATFORM)
+
+.PHONY: cleankernel
+cleankernel:
+	rm -rf _x *.xo *.xclbin *.log *.xclbin.* *.xo.* emconfig.json .Xil .run
+
+.PHONY: cleanall
+cleanall: clean cleankernel
 
 ###########################################################################
 #

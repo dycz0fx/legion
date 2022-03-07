@@ -30,11 +30,15 @@ USE_HDF         ?= 0		# Include HDF5 support (requires HDF5)
 ALT_MAPPERS     ?= 0		# Include alternative mappers (not recommended)
 
 # Include FPGA support (requires Xilinx FPGA)
-USE_FPGA        ?= 1   
+USE_FPGA        ?= 1 
+# Include FPGA coprocessor support
+USE_FPGA_COPROCESSOR ?= 0
 # Path to the Xilinx platform definition file
 PLATFORM        ?= /home/centos/src/project_data/aws-fpga/Vitis/aws_platform/xilinx_aws-vu9p-f1_shell-v04261818_201920_2/xilinx_aws-vu9p-f1_shell-v04261818_201920_2.xpfm
-# Software emulation (sw_emu), hardware emulation (hw_emu), hardware (hw)
+# FPGA kenrel compilation target: Software emulation (sw_emu), hardware emulation (hw_emu), hardware (hw)
 TARGET          ?= sw_emu
+# v++ flags
+VPPFLAGS = -g -I.
 
 
 # Put the binary file name here
@@ -50,17 +54,19 @@ NVCC_FLAGS	?=
 GASNET_FLAGS	?=
 LD_FLAGS	?=
 CXX ?= g++
-VPPFLAGS = -g -I.
 
 # we're going to include runtime.mk to get variable settings, but then
 #  do our own build steps
 NO_BUILD_RULES=1
 include $(LG_RT_DIR)/runtime.mk
 
-TESTS := fpga_vadd fpga_coprocessor
+TESTS := fpga_vadd 
+ifeq ($(USE_FPGA_COPROCESSOR),1)
+	TESTS += fpga_coprocessor
+endif
 
 # can set arguments to be passed to a test when running
-TESTARGS_fpga_vadd :=  -ll:fpga 1 -ll:fpga_size 400 -ll:fpga_xclbin vadd.xclbin -level fpga=1 -level app=1
+TESTARGS_fpga_vadd :=  -ll:fpga 1 -ll:fpga_size 4 -ll:fpga_xclbin vadd.xclbin -level fpga=1 -level app=1
 TESTARGS_fpga_coprocessor := -ll:fpga 1 -ll:fpga_size 4 -ll:fpga_xclbin vadd.xclbin -ll:fpga_coprocessor_kernel vadd -ll:fpga_coprocessor_num_cu 1  -level fpga=1 -level app=1
 
 REALM_OBJS := $(patsubst %.cc,%.o,$(notdir $(REALM_SRC))) \
@@ -76,17 +82,26 @@ REALM_LIB := librealm.a
 
 TEST_OBJS := $(TESTS:%=%.o)
 
+.PHONY: run_all 
 run_all : $(TESTS:%=run_%)
 
-run_% : %
+.PHONY: run_%
+run_% : % vadd.xclbin emconfig
 	@# this echos exactly once, even if -s was specified
 	@echo $(LAUNCHER) ./$* $(TESTARGS_$*)
 	@XCL_EMULATION_MODE=$(TARGET) $(LAUNCHER) ./$* $(TESTARGS_$*)
 
+.PHONY: build
 build : $(TESTS) vadd.xclbin emconfig
 
-clean :
+.PHONY: cleankernel
+cleankernel:
+	rm -rf _x *.xo *.xclbin *.log *.xclbin.* *.xo.* emconfig.json .Xil .run
+
+.PHONY: clean
+clean : cleankernel
 	rm -f $(REALM_LIB) $(REALM_OBJS) $(TESTS) $(TEST_OBJS)
+	rm -f legion_defines.h realm_defines.h
 
 $(TESTS) : % : %.o librealm.a
 	$(CXX) -o $@ $< -L. -lrealm $(LEGION_LD_FLAGS) $(LD_FLAGS)
