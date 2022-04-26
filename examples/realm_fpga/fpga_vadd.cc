@@ -2,6 +2,7 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <unistd.h>  //sleep
+#include <chrono>
 
 #include "realm.h"
 #include "realm/fpga/fpga_utils.h"
@@ -10,8 +11,8 @@
 
 using namespace Realm;
 
-#define DEFAULT_COMP_UNITS 1
-#define DATA_SIZE 12
+#define DEFAULT_COMP_UNITS 32
+#define DATA_SIZE 4194304
 
 enum
 {
@@ -112,6 +113,8 @@ void top_level_task(const void *args, size_t arglen,
                     const void *userdata, size_t userlen, Processor p)
 {
     log_app.print() << "top task running on " << p;
+    std::chrono::duration<double> total_seconds;
+    total_seconds = std::chrono::nanoseconds::zero();
     Machine machine = Machine::get_machine();
     std::set<Processor> all_processors;
     machine.get_all_processors(all_processors);
@@ -217,12 +220,12 @@ void top_level_task(const void *args, size_t arglen,
             }
             fill_z.wait();
 
-            printf("fpga_ra_x:\n");
-            for (int i = bounds.lo; i <= bounds.hi; i++)
-            {
-                printf("%d ", fpga_ra_x[i]);
-            }
-            printf("\n");
+            // printf("fpga_ra_x:\n");
+            // for (int i = bounds.lo; i <= bounds.hi; i++)
+            // {
+            //     printf("%d ", fpga_ra_x[i]);
+            // }
+            // printf("\n");
 
             // fill cpu mem and copy to fpga mem
             Event fill_y_cpu;
@@ -243,26 +246,29 @@ void top_level_task(const void *args, size_t arglen,
             }
             copy_y.wait();
 
-            printf("cpu_ra_y:\n");
-            for (int i = bounds.lo; i <= bounds.hi; i++)
-            {
-                printf("%d ", cpu_ra_y[i]);
-            }
-            printf("\n");
-            printf("fpga_ra_y:\n");
-            for (int i = bounds.lo; i <= bounds.hi; i++)
-            {
-                printf("%d ", fpga_ra_y[i]);
-            }
-            printf("\n");
+            // printf("cpu_ra_y:\n");
+            // for (int i = bounds.lo; i <= bounds.hi; i++)
+            // {
+            //     printf("%d ", cpu_ra_y[i]);
+            // }
+            // printf("\n");
+            // printf("fpga_ra_y:\n");
+            // for (int i = bounds.lo; i <= bounds.hi; i++)
+            // {
+            //     printf("%d ", fpga_ra_y[i]);
+            // }
+            // printf("\n");
 
             FPGAArgs fpga_args;
             fpga_args.x_inst = fpga_inst;
             fpga_args.y_inst = fpga_inst;
             fpga_args.z_inst = fpga_inst;
             fpga_args.bounds = bounds;
+            auto start = std::chrono::system_clock::now();
             Event e = pp.spawn(FPGA_TASK, &fpga_args, sizeof(fpga_args));
-
+            e.wait();
+            auto end = std::chrono::system_clock::now();
+            total_seconds = total_seconds + end - start;
             // Copy back
             Event z_ready;
             {
@@ -273,15 +279,16 @@ void top_level_task(const void *args, size_t arglen,
             }
             z_ready.wait();
 
-            AffineAccessor<int, 1> ra_z = AffineAccessor<int, 1>(cpu_inst, FID_Z);
-            for (int i = bounds.lo; i <= bounds.hi; i++)
-            {
-                printf("%d ", ra_z[i]);
-            }
-            printf("\n");
+            // AffineAccessor<int, 1> ra_z = AffineAccessor<int, 1>(cpu_inst, FID_Z);
+            // for (int i = bounds.lo; i <= bounds.hi; i++)
+            // {
+            //     printf("%d ", ra_z[i]);
+            // }
+            // printf("\n");
         }
     }
-
+    log_app.print() << "time: " << total_seconds.count() << "s";
+    log_app.print() << "through_put: " << 4 / total_seconds.count() << "MB/s";
     log_app.print() << "all done!";
 }
 

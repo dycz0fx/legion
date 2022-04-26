@@ -61,7 +61,7 @@ include $(LG_RT_DIR)/runtime.mk
 TESTS := fpga_vadd
 
 # can set arguments to be passed to a test when running
-TESTARGS_fpga_vadd :=  -ll:fpga 1 -ll:fpga_size 4 -ll:fpga_xclbin vadd.xclbin -level fpga=1 -level app=1
+TESTARGS_fpga_vadd :=  -ll:fpga 1 -ll:fpga_size 512 -ll:fpga_xclbin vadd.xclbin 
 
 REALM_OBJS := $(patsubst %.cc,%.o,$(notdir $(REALM_SRC))) \
               $(patsubst %.cc.o,%.o,$(notdir $(REALM_INST_OBJS))) \
@@ -150,7 +150,7 @@ vadd.xo: vadd.cpp
 	v++ $(VPPFLAGS) -t $(TARGET) --platform $(PLATFORM) -c -k vadd -o vadd.xo vadd.cpp
 
 vadd.xclbin: vadd.xo
-	v++ $(VPPFLAGS) -t $(TARGET) --platform $(PLATFORM) -l --connectivity.nk vadd:4 --connectivity.sp vadd_1.m_axi_gmem:DDR[0] --connectivity.sp vadd_2.m_axi_gmem:DDR[0] --connectivity.sp vadd_3.m_axi_gmem:DDR[0] --connectivity.sp vadd_4.m_axi_gmem:DDR[0] -o vadd.xclbin vadd.xo
+	v++ $(VPPFLAGS) -t $(TARGET) --platform $(PLATFORM) -l --connectivity.nk vadd:32 -o vadd.xclbin vadd.xo
 
 # Create emulation config file
 emconfig: emconfig.json

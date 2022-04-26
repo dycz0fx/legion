@@ -1738,11 +1738,11 @@ namespace Realm
                         if ((total_bytes >= min_xfer_size) && work_until.is_expired())
                             break;
                     }
-                    for (size_t i = 0; i < 50; i++)
-                    {
-                        printf("%d ", ((int *)(channel->fpga->fpga_mem->base_ptr_sys))[i]);
-                    }
-                    printf("\n");
+                    // for (size_t i = 0; i < 50; i++)
+                    // {
+                    //     printf("%d ", ((int *)(channel->fpga->fpga_mem->base_ptr_sys))[i]);
+                    // }
+                    // printf("\n");
 
                     log_fpga.info() << "before write buffer, initial_out_offset " << initial_out_offset << " total_bytes " << total_bytes;
 
